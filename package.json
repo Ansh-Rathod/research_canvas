@@ -1,0 +1,26 @@
+{
+  "name": "research-canvas-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build && node ./scripts/copy-manifest.mjs",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tldraw/tldraw": "^3.14.4",
+    "idb": "^8.0.3",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.325",
+    "@types/node": "^24.3.3",
+    "@types/react": "^19.1.5",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}

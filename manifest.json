@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Research Canvas",
+  "version": "0.1.0",
+  "description": "Split-screen tldraw research canvas with local captures.",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "scripting",
+    "storage",
+    "tabs",
+    "sidePanel",
+    "tabCapture",
+    "clipboardRead",
+    "clipboardWrite"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "action": {
+    "default_title": "Research Canvas"
+  },
+  "commands": {
+    "capture-area-image": {
+      "description": "Capture selected area to Research Canvas"
+    },
+    "record-area-video": {
+      "description": "Record selected area to Research Canvas"
+    },
+    "capture-url-card": {
+      "description": "Save current page URL as card to Research Canvas"
+    },
+    "capture-element-region": {
+      "description": "Capture page region (hover and click) to Research Canvas"
+    },
+    "record-element-region": {
+      "description": "Record page region (hover and click) to Research Canvas"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://youtube.com https://m.youtube.com https://www.google.com https://accounts.google.com;"
+  }
+}

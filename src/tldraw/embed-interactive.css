@@ -1,0 +1,42 @@
+/*
+ * tldraw sets pointer-events: none on embed iframes until the shape is in an
+ * "editing" interaction state. In a cramped extension side panel, that feels
+ * broken (YouTube never receives clicks). Force the iframe to accept pointer
+ * events; move/drag the shape using its selection handles or empty canvas area.
+ */
+iframe.tl-embed {
+  pointer-events: auto !important;
+}
+
+/* Center play affordance for captured / local videos (research video shape util). */
+.research-video-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  z-index: 2;
+  background: rgba(15, 23, 42, 0.42);
+  border-radius: inherit;
+}
+
+.research-video-play-overlay:hover {
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.research-video-play-overlay:focus-visible {
+  outline: 2px solid var(--color-selected, #3b82f6);
+  outline-offset: 2px;
+}
+
+/* Scale with shape + zoom (fixed px looked wrong inside `.tl-counter-scaled`). */
+.research-video-play-icon {
+  width: clamp(0.875rem, 28%, 5rem);
+  height: auto;
+  aspect-ratio: 1;
+  flex-shrink: 0;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%));
+}

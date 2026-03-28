@@ -1,0 +1,32 @@
+/*
+ * RichTextLabel defaults to .tl-text-label { position: absolute; inset: 0 } so the label
+ * fills a *fixed* box. In a flex column without a defined height that collapses the row to
+ * ~one line and the background only covers that strip. Force in-flow layout for quotes.
+ */
+.research-quote__body .tl-text-label.tl-text-wrapper {
+  position: relative !important;
+  inset: auto !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+}
+
+.research-quote__body .tl-text-label__inner.tl-text-content__wrapper {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+.research-quote__body .tl-text.tl-text-content {
+  position: relative !important;
+  inset: auto !important;
+  width: 100% !important;
+  height: auto !important;
+}
+
+.research-quote__body .tl-rich-text {
+  width: 100%;
+}
