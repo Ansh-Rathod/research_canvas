@@ -640,9 +640,13 @@ function mapRectToVideoSource(
 function tryMountFloatingToolbar() {
   void chrome.storage.local.get(FLOATING_TOOLBAR_HIDDEN_KEY, (r) => {
     if (r[FLOATING_TOOLBAR_HIDDEN_KEY]) return;
-    mountFloatingCaptureToolbar({
-      onRecordingAction: beginToolbarRecordingFromClick,
-    });
+    try {
+      mountFloatingCaptureToolbar({
+        onRecordingAction: beginToolbarRecordingFromClick,
+      });
+    } catch (e) {
+      console.error("Research Canvas: failed to mount floating toolbar", e);
+    }
   });
 }
 

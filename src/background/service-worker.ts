@@ -20,25 +20,6 @@ import {
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
 
-/** Mirrors `sidePanelHeartbeatAt` in storage so we can decide open vs close without `await` (keeps user gesture for `sidePanel.open`). */
-let lastSidePanelHeartbeatMs = 0;
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !changes.sidePanelHeartbeatAt) return;
-  const ch = changes.sidePanelHeartbeatAt;
-  if (ch.newValue != null) {
-    lastSidePanelHeartbeatMs = Number(ch.newValue);
-  } else {
-    lastSidePanelHeartbeatMs = 0;
-  }
-});
-
-void chrome.storage.local.get("sidePanelHeartbeatAt").then((r) => {
-  if (r.sidePanelHeartbeatAt != null) {
-    lastSidePanelHeartbeatMs = Number(r.sidePanelHeartbeatAt);
-  }
-});
-
 function createRequest(
   tabId: number,
   action: CaptureAction,
@@ -349,10 +330,13 @@ chrome.runtime.onMessage.addListener(
           sendResponse({ ok: false, error: "No tab." });
           return;
         }
-        const likelyOpen =
-          lastSidePanelHeartbeatMs > 0 &&
-          Date.now() - lastSidePanelHeartbeatMs < 8000;
-        if (likelyOpen) {
+        const { sidePanelHeartbeatAt } = await chrome.storage.local.get(
+          "sidePanelHeartbeatAt",
+        );
+        const hb = Number(sidePanelHeartbeatAt ?? 0);
+        const panelSeemsLive =
+          hb > 0 && Date.now() - hb < 12000;
+        if (panelSeemsLive) {
           try {
             await chrome.runtime.sendMessage({
               type: "CLOSE_SIDE_PANEL",
@@ -360,8 +344,18 @@ chrome.runtime.onMessage.addListener(
           } catch {
             /* side panel not listening */
           }
+          await chrome.storage.local.remove("sidePanelHeartbeatAt");
         } else {
-          primeSidePanelFromUserGesture(tabId);
+          try {
+            await chrome.sidePanel.setOptions({
+              tabId,
+              path: "src/sidepanel/index.html",
+              enabled: true,
+            });
+            await chrome.sidePanel.open({ tabId });
+          } catch (err) {
+            console.warn("Research Canvas: sidePanel.open failed", err);
+          }
         }
         sendResponse({ ok: true });
         return;

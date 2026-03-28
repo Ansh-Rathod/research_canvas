@@ -845,7 +845,17 @@ export function ResearchCanvasApp() {
     };
     heartbeat();
     const interval = window.setInterval(heartbeat, 2000);
+    /** When the side panel is hidden (Chrome UI) but not unloaded, stop heartbeats so the toolbar can open it again. */
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        void chrome.storage.local.remove("sidePanelHeartbeatAt");
+      } else {
+        heartbeat();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(interval);
       void chrome.storage.local.remove("sidePanelHeartbeatAt");
     };

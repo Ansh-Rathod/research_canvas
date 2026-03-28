@@ -5,11 +5,119 @@
 
 const TOOLBAR_ID = "research-canvas-float-toolbar-root";
 const TOOLBAR_POS_KEY = "research-canvas-float-toolbar-pos";
+const TOOLTIP_EL_ID = "research-canvas-toolbar-tooltip";
 export const FLOATING_TOOLBAR_HIDDEN_KEY = "floatingToolbarHidden";
+
+let tooltipShowTimer: number | undefined;
+
+/**
+ * `document.body` can still be null when the content script runs (heavy SPAs, iframes).
+ * `document.body.append` throws and fails the entire content script. `<html>` always exists.
+ */
+function appendToBody(node: HTMLElement): void {
+  if (document.body) {
+    document.body.append(node);
+    return;
+  }
+  document.documentElement.append(node);
+}
+
+function getTooltipEl(): HTMLDivElement {
+  let el = document.getElementById(TOOLTIP_EL_ID) as HTMLDivElement | null;
+  if (!el) {
+    el = document.createElement("div");
+    el.id = TOOLTIP_EL_ID;
+    el.setAttribute("role", "tooltip");
+    Object.assign(el.style, {
+      position: "fixed",
+      zIndex: "2147483647",
+      pointerEvents: "none",
+      padding: "7px 10px",
+      fontSize: "12px",
+      lineHeight: "1.4",
+      maxWidth: "min(280px, calc(100vw - 24px))",
+      background: "rgba(17,24,39,0.94)",
+      color: "#f9fafb",
+      borderRadius: "8px",
+      boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+      fontFamily: "system-ui, -apple-system, sans-serif",
+      visibility: "hidden",
+      opacity: "0",
+      transition: "opacity 0.08s ease",
+      left: "0",
+      top: "0",
+    });
+    appendToBody(el);
+  }
+  return el;
+}
+
+function positionTooltipNear(anchor: HTMLElement): void {
+  const el = getTooltipEl();
+  const r = anchor.getBoundingClientRect();
+  const margin = 8;
+  const tw = el.offsetWidth;
+  const th = el.offsetHeight;
+  let left = r.left + r.width / 2 - tw / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - tw - margin));
+  let top = r.bottom + margin;
+  if (top + th > window.innerHeight - margin) {
+    top = r.top - th - margin;
+  }
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(Math.max(margin, top))}px`;
+}
+
+function showFloatingTooltip(text: string, anchor: HTMLElement): void {
+  clearTooltipShowTimer();
+  tooltipShowTimer = window.setTimeout(() => {
+    tooltipShowTimer = undefined;
+    const el = getTooltipEl();
+    el.textContent = text;
+    el.style.visibility = "visible";
+    el.style.opacity = "1";
+    requestAnimationFrame(() => positionTooltipNear(anchor));
+  }, 200);
+}
+
+function clearTooltipShowTimer(): void {
+  if (tooltipShowTimer !== undefined) {
+    window.clearTimeout(tooltipShowTimer);
+    tooltipShowTimer = undefined;
+  }
+}
+
+function hideFloatingTooltip(): void {
+  clearTooltipShowTimer();
+  const el = document.getElementById(TOOLTIP_EL_ID);
+  if (el) {
+    el.style.visibility = "hidden";
+    el.style.opacity = "0";
+  }
+}
+
+function bindHoverTooltip(el: HTMLElement, text: string): void {
+  el.addEventListener("mouseenter", () => showFloatingTooltip(text, el));
+  el.addEventListener("mouseleave", hideFloatingTooltip);
+  el.addEventListener("focus", () => showFloatingTooltip(text, el));
+  el.addEventListener("blur", hideFloatingTooltip);
+}
+
+/** Lets hover hit the `<button>` so tooltips and cursor stay consistent. */
+function disableSvgPointerEvents(button: HTMLElement): void {
+  for (const svg of button.querySelectorAll("svg")) {
+    (svg as SVGSVGElement).style.pointerEvents = "none";
+  }
+}
+
+function removeFloatingTooltipNode(): void {
+  hideFloatingTooltip();
+  document.getElementById(TOOLTIP_EL_ID)?.remove();
+}
 
 /** Filled “panel + main” icon (Chrome side panel open/close). */
 const ICON_TOGGLE_SIDE_PANEL =
-  "M3 3h6v18H3V3zm9 3h10v12H12V6z";
+  "m12.748 4.001-.001.002h7.498c.967 0 1.75.784 1.75 1.75v12.495a1.75 1.75 0 0 1-1.75 1.75h-8.997l-.001-.002H3.75A1.75 1.75 0 0 1 2 18.246V5.751c0-.967.784-1.75 1.75-1.75h8.998Zm7.497 1.502h-7.497v12.995h7.497a.25.25 0 0 0 .25-.25V5.754a.25.25 0 0 0-.25-.25Zm-8.997-.002H3.75a.25.25 0 0 0-.25.25v12.495c0 .138.112.25.25.25h7.498V5.501Zm7.502.999a.75.75 0 0 1 0 1.5h-4.502a.75.75 0 0 1 0-1.5h4.502Z";
 /** Stroked X — hide toolbar (fill-only svg would not draw line paths). */
 const ICON_HIDE_STROKE = "M6 6l12 12M18 6L6 18";
 
@@ -23,7 +131,6 @@ type ToolbarAction =
   | "capture-selected-text-body"
   | "capture-selected-text-note"
   | "capture-selected-text-quote";
-
 const DEFAULT_BUTTONS: {
   action: ToolbarAction;
   title: string;
@@ -32,27 +139,27 @@ const DEFAULT_BUTTONS: {
   {
     action: "capture-area-image",
     title: "Capture selected area (image)",
-    path: "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3 3.5-4.5 4.5 6H5l3.5-4.5z",
+    path: "M17.75 3A3.25 3.25 0 0 1 21 6.25v11.5A3.25 3.25 0 0 1 17.75 21H6.25A3.25 3.25 0 0 1 3 17.75V6.25A3.25 3.25 0 0 1 6.25 3h11.5Zm.58 16.401-5.805-5.686a.75.75 0 0 0-.966-.071l-.084.07-5.807 5.687c.182.064.378.099.582.099h11.5c.203 0 .399-.035.58-.099l-5.805-5.686L18.33 19.4ZM17.75 4.5H6.25A1.75 1.75 0 0 0 4.5 6.25v11.5c0 .208.036.408.103.594l5.823-5.701a2.25 2.25 0 0 1 3.02-.116l.128.116 5.822 5.702c.067-.186.104-.386.104-.595V6.25a1.75 1.75 0 0 0-1.75-1.75Zm-2.498 2a2.252 2.252 0 1 1 0 4.504 2.252 2.252 0 0 1 0-4.504Zm0 1.5a.752.752 0 1 0 0 1.504.752.752 0 0 0 0-1.504Z",
   },
   {
     action: "record-area-video",
     title: "Record selected area (video)",
-    path: "M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z",
+    path: "M6.25 4h11.5a3.25 3.25 0 0 1 3.245 3.066L21 7.25v9.5a3.25 3.25 0 0 1-3.066 3.245L17.75 20H6.25a3.25 3.25 0 0 1-3.245-3.066L3 16.75v-9.5a3.25 3.25 0 0 1 3.066-3.245L6.25 4h11.5-11.5Zm11.5 1.5H6.25a1.75 1.75 0 0 0-1.744 1.606L4.5 7.25v9.5a1.75 1.75 0 0 0 1.606 1.744l.144.006h11.5a1.75 1.75 0 0 0 1.744-1.607l.006-.143v-9.5a1.75 1.75 0 0 0-1.607-1.744L17.75 5.5Zm-7.697 4.085a.5.5 0 0 1 .587-.256l.084.033 4.382 2.19a.5.5 0 0 1 .076.848l-.076.047-4.382 2.191a.5.5 0 0 1-.716-.357L10 14.19V9.809a.5.5 0 0 1 .053-.224Z",
   },
   {
     action: "capture-element-region",
     title: "Capture region (hover & click)",
-    path: "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 7h10v2H7V7zm0 4h10v2H7v-2zm0 4h7v2H7v-2z",
+    path: "M21.25 13a.75.75 0 0 1 .743.648l.007.102v5a3.25 3.25 0 0 1-3.066 3.245L18.75 22h-4.668c.536-.385.973-.9 1.265-1.499l3.403-.001a1.75 1.75 0 0 0 1.744-1.607l.006-.143v-5a.75.75 0 0 1 .75-.75Zm-9.5-4A3.25 3.25 0 0 1 15 12.25v6.5A3.25 3.25 0 0 1 11.75 22h-6.5A3.25 3.25 0 0 1 2 18.75v-6.5A3.25 3.25 0 0 1 5.25 9h6.5Zm-4.032 8.353-.102.091L4.663 20.4c.184.066.381.101.587.101h6.5c.206 0 .403-.035.587-.1l-2.953-2.955a1.25 1.25 0 0 0-1.558-.17l-.108.078ZM11.75 10.5h-6.5a1.75 1.75 0 0 0-1.75 1.75v6.5c0 .206.036.403.1.587l2.955-2.953a2.75 2.75 0 0 1 3.752-.129l.138.129 2.954 2.953c.066-.184.101-.381.101-.587v-6.5a1.75 1.75 0 0 0-1.75-1.75ZM11 12a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm7.75-10a3.25 3.25 0 0 1 3.245 3.066L22 5.25v5a.75.75 0 0 1-1.493.102l-.007-.102v-5a1.75 1.75 0 0 0-1.606-1.744L18.75 3.5h-5a.75.75 0 0 1-.102-1.493L13.75 2h5Zm-8.5 0a.75.75 0 0 1 .102 1.493l-.102.007h-5a1.75 1.75 0 0 0-1.744 1.606L3.5 5.25v3.402c-.6.292-1.114.73-1.5 1.266V5.25a3.25 3.25 0 0 1 3.066-3.245L5.25 2h5Z",
   },
   {
     action: "record-element-region",
     title: "Record region (hover & click)",
-    path: "M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4zM15 13H6v-2h9v2zm0-4H6V7h9v2z",
+    path: "M21.25 13a.75.75 0 0 1 .743.648l.007.102v5a3.25 3.25 0 0 1-3.066 3.245L18.75 22h-4.668c.536-.385.973-.9 1.265-1.499l3.403-.001a1.75 1.75 0 0 0 1.744-1.607l.006-.143v-5a.75.75 0 0 1 .75-.75Zm-9.5-4A3.25 3.25 0 0 1 15 12.25v6.5A3.25 3.25 0 0 1 11.75 22h-6.5A3.25 3.25 0 0 1 2 18.75v-6.5A3.25 3.25 0 0 1 5.25 9h6.5Zm0 1.5h-6.5a1.75 1.75 0 0 0-1.75 1.75v6.5c0 .966.784 1.75 1.75 1.75h6.5a1.75 1.75 0 0 0 1.75-1.75v-6.5a1.75 1.75 0 0 0-1.75-1.75Zm-5.689 2.603a.5.5 0 0 1 .596-.236l.082.036 3.956 2.158a.5.5 0 0 1 .075.828l-.075.05-3.956 2.158a.5.5 0 0 1-.73-.35L6 17.658v-4.315a.5.5 0 0 1 .061-.24ZM18.75 2a3.25 3.25 0 0 1 3.245 3.066L22 5.25v5a.75.75 0 0 1-1.493.102l-.007-.102v-5a1.75 1.75 0 0 0-1.606-1.744L18.75 3.5h-5a.75.75 0 0 1-.102-1.493L13.75 2h5Zm-8.5 0a.75.75 0 0 1 .102 1.493l-.102.007h-5a1.75 1.75 0 0 0-1.744 1.606L3.5 5.25v3.402c-.6.292-1.114.73-1.5 1.266V5.25a3.25 3.25 0 0 1 3.066-3.245L5.25 2h5Z",
   },
   {
     action: "capture-url-card",
     title: "Save URL as card",
-    path: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1H8v1.9h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z",
+    path: "M6.19 21.854a.75.75 0 0 1-1.188-.61V6.25a3.25 3.25 0 0 1 3.25-3.25h7.499A3.25 3.25 0 0 1 19 6.249v14.996a.75.75 0 0 1-1.188.609l-5.811-4.181-5.812 4.18ZM17.5 6.249a1.75 1.75 0 0 0-1.75-1.75H8.253a1.75 1.75 0 0 0-1.75 1.75v13.532l5.062-3.64a.75.75 0 0 1 .876 0l5.06 3.64V6.25Z",
   },
 ];
 
@@ -60,22 +167,22 @@ const TEXT_BUTTONS: { action: ToolbarAction; title: string; path: string }[] = [
   {
     action: "capture-selected-text-heading",
     title: "Add selection as heading",
-    path: "M5 4v3h5.5V4h2v16h-2v-6H5v3l-5-4 5-4zm14 0l-5 4 5 4v-3h5.5V4h-2v6H14V4h-2v3z",
+    path: "M19.59 5.081a.746.746 0 0 0-.809.084.751.751 0 0 0-.249.367c-.69 2.051-2.057 3.409-3.168 4.075a.75.75 0 0 0 .772 1.286c.774-.464 1.623-1.18 2.364-2.146v9.503a.75.75 0 0 0 1.5 0V5.772a.75.75 0 0 0-.41-.69ZM3.5 5.75a.75.75 0 0 0-1.5 0v12.5a.75.75 0 0 0 1.5 0V12.5H10v5.75a.75.75 0 0 0 1.5 0V5.75a.75.75 0 0 0-1.5 0V11H3.5V5.75Z",
   },
   {
     action: "capture-selected-text-body",
     title: "Add selection as text",
-    path: "M3 17.25V21h1.75L17.81 9.94l-1.75-1.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+    path: "M5 4.75A.75.75 0 0 1 5.75 4h12.5a.75.75 0 0 1 .75.75v2a.75.75 0 0 1-1.5 0V5.5h-4.75v13h1.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5h1.5v-13H6.5v1.25a.75.75 0 0 1-1.5 0v-2Z",
   },
   {
     action: "capture-selected-text-note",
     title: "Add selection as note",
-    path: "M3 18h12v-2H3v2zM3 6v2h18V6H3zm0 7h18v-2H3v2z",
+    path: "M17.75 3A3.25 3.25 0 0 1 21 6.25v6.879a2.25 2.25 0 0 1-.659 1.59l-5.621 5.622a2.25 2.25 0 0 1-1.591.659H6.25A3.25 3.25 0 0 1 3 17.75V6.25A3.25 3.25 0 0 1 6.25 3h11.5Zm0 1.5H6.25A1.75 1.75 0 0 0 4.5 6.25v11.5c0 .966.784 1.75 1.75 1.75H13v-3.25a3.25 3.25 0 0 1 3.066-3.245L16.25 13h3.25V6.25a1.75 1.75 0 0 0-1.75-1.75Zm.689 10H16.25a1.75 1.75 0 0 0-1.744 1.607l-.006.143v2.189l3.939-3.939Z",
   },
   {
     action: "capture-selected-text-quote",
     title: "Add selection as quote",
-    path: "M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z",
+    path: "M7.5 6a2.5 2.5 0 0 1 2.495 2.336l.005.206c-.01 3.555-1.24 6.614-3.705 9.223a.75.75 0 1 1-1.09-1.03c1.64-1.737 2.66-3.674 3.077-5.859A2.5 2.5 0 1 1 7.5 6Zm9 0a2.5 2.5 0 0 1 2.495 2.336l.005.206c-.01 3.56-1.238 6.614-3.705 9.223a.75.75 0 1 1-1.09-1.03c1.643-1.738 2.662-3.672 3.078-5.859A2.5 2.5 0 1 1 16.5 6Zm-9 1.5a1 1 0 1 0 .993 1.117l.007-.124a1 1 0 0 0-1-.993Zm9 0a1 1 0 1 0 .993 1.117l.007-.124a1 1 0 0 0-1-.993Z",
   },
 ];
 
@@ -195,38 +302,32 @@ function attachToolbarDrag(root: HTMLElement): void {
   });
 }
 
-function svgIcon(pathD: string, accessibleName?: string): SVGSVGElement {
+function svgIcon(pathD: string): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("width", "18");
   svg.setAttribute("height", "18");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("fill", "currentColor");
-  if (accessibleName) {
-    const t = document.createElementNS(ns, "title");
-    t.textContent = accessibleName;
-    svg.append(t);
-  }
+  svg.setAttribute("aria-hidden", "true");
   const p = document.createElementNS(ns, "path");
   p.setAttribute("d", pathD);
   svg.append(p);
   return svg;
 }
 
-function svgIconStroke(pathD: string, accessibleName: string): SVGSVGElement {
+function svgIconStroke(pathD: string): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "18");
-  svg.setAttribute("height", "18");
-  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "20");
+  svg.setAttribute("viewBox", "0 0 26 26");
   svg.setAttribute("fill", "none");
-  const t = document.createElementNS(ns, "title");
-  t.textContent = accessibleName;
-  svg.append(t);
+  svg.setAttribute("aria-hidden", "true");
   const p = document.createElementNS(ns, "path");
   p.setAttribute("d", pathD);
   p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "2.25");
+  p.setAttribute("stroke-width", "2.5");
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   svg.append(p);
@@ -241,6 +342,7 @@ function triggerCapture(action: ToolbarAction): void {
 }
 
 export function unmountFloatingCaptureToolbar(): void {
+  removeFloatingTooltipNode();
   document.getElementById(TOOLBAR_ID)?.remove();
 }
 
@@ -288,7 +390,6 @@ export function mountFloatingCaptureToolbar(options?: {
 
   const handle = document.createElement("div");
   handle.setAttribute("data-research-canvas-toolbar-drag-handle", "");
-  handle.title = "Drag to move";
   handle.setAttribute("aria-label", "Drag to move toolbar");
   Object.assign(handle.style, {
     flexShrink: "0",
@@ -311,6 +412,7 @@ export function mountFloatingCaptureToolbar(options?: {
     opacity: "0.85",
   });
   handle.append(grip);
+  bindHoverTooltip(handle, "Drag to move toolbar");
   root.append(handle);
 
   const inner = document.createElement("div");
@@ -343,7 +445,6 @@ export function mountFloatingCaptureToolbar(options?: {
   ) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.title = tooltip;
     btn.setAttribute("aria-label", tooltip);
     Object.assign(btn.style, {
       display: "grid",
@@ -358,6 +459,8 @@ export function mountFloatingCaptureToolbar(options?: {
       cursor: "pointer",
     });
     btn.append(icon);
+    disableSvgPointerEvents(btn);
+    bindHoverTooltip(btn, tooltip);
     btn.onmouseenter = () => {
       btn.style.background = "#e5e7eb";
     };
@@ -373,27 +476,22 @@ export function mountFloatingCaptureToolbar(options?: {
   }
 
   addUtilityButton(
-    "Open or close Research Canvas in the browser side panel (same as clicking the extension icon)",
+    "Open or close Research Canvas",
     () => {
       void chrome.runtime.sendMessage({
         type: "TOGGLE_CHROME_SIDE_PANEL",
       });
     },
-    svgIcon(
-      ICON_TOGGLE_SIDE_PANEL,
-      "Open or close Research Canvas side panel",
-    ),
+    svgIcon(ICON_TOGGLE_SIDE_PANEL),
   );
   addUtilityButton(
     "Hide this toolbar — right-click the page → “Show Research Canvas floating toolbar” to bring it back",
     () => {
       void chrome.storage.local.set({ [FLOATING_TOOLBAR_HIDDEN_KEY]: true });
+      removeFloatingTooltipNode();
       root.remove();
     },
-    svgIconStroke(
-      ICON_HIDE_STROKE,
-      "Hide floating toolbar (restore from the page context menu)",
-    ),
+    svgIconStroke(ICON_HIDE_STROKE),
   );
 
   inner.append(utilityRow);
@@ -414,7 +512,6 @@ export function mountFloatingCaptureToolbar(options?: {
     for (const def of defs) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.title = def.title;
       btn.setAttribute("aria-label", def.title);
       Object.assign(btn.style, {
         display: "grid",
@@ -428,7 +525,9 @@ export function mountFloatingCaptureToolbar(options?: {
         color: "#111827",
         cursor: "pointer",
       });
-      btn.append(svgIcon(def.path, def.title));
+      btn.append(svgIcon(def.path));
+      disableSvgPointerEvents(btn);
+      bindHoverTooltip(btn, def.title);
       btn.onmouseenter = () => {
         btn.style.background = "#e5e7eb";
       };
@@ -456,7 +555,7 @@ export function mountFloatingCaptureToolbar(options?: {
   document.addEventListener("selectionchange", onSel);
   render();
 
-  document.body.append(root);
+  appendToBody(root);
   if (saved) {
     requestAnimationFrame(() => clampToolbarToViewport(root));
   }
