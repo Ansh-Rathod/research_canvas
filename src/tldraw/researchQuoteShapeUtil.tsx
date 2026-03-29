@@ -27,7 +27,7 @@ import "./research-quote.css";
 /** Total shape width: left bar + horizontal padding + text column (aligned with ~400px reading width used by auto-size text captures). */
 export const RESEARCH_QUOTE_SHAPE_W = 445;
 
-const LEFT_BAR_PX = 5;
+const LEFT_BAR_PX = 10;
 /** Inner padding around quote text (px). */
 const INNER_PAD_X = 26;
 const INNER_PAD_Y = 26;
@@ -56,7 +56,11 @@ export const researchQuoteShapeMigrations = createShapePropsMigrationSequence({
   sequence: [],
 });
 
-function ResearchQuoteShapeComponent({ shape }: { shape: TLResearchQuoteShape }) {
+function ResearchQuoteShapeComponent({
+  shape,
+}: {
+  shape: TLResearchQuoteShape;
+}) {
   const editor = useEditor();
   const theme = useDefaultColorTheme();
   const measureRef = useRef<HTMLDivElement>(null);
@@ -145,7 +149,7 @@ function ResearchQuoteShapeComponent({ shape }: { shape: TLResearchQuoteShape })
           <RichTextLabel
             shapeId={shape.id}
             type="researchQuote"
-            font="serif"
+            font="sans"
             fontSize={LABEL_FONT_SIZES.xl}
             lineHeight={TEXT_PROPS.lineHeight}
             align="start"

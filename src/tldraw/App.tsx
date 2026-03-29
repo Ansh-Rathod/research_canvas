@@ -1,8 +1,9 @@
 import {
   type ArtifactRecord,
-  type CanvasRecord,
   type RuntimeMessage,
 } from "@shared/messages";
+import { MAIN_DOCUMENT_ID } from "@shared/document";
+import { mergeDeletedArtifactTombstones } from "@storage/tombstones";
 import type { Editor } from "@tldraw/editor";
 import {
   Box,
@@ -19,7 +20,7 @@ import {
 } from "@tldraw/tldraw";
 import "@tldraw/tldraw/tldraw.css";
 import type { TLRichText } from "@tldraw/tlschema";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./embed-interactive.css";
 import { ResearchEmbedShapeUtil } from "./researchEmbedShapeUtil";
 import {
@@ -78,30 +79,34 @@ function toAssetId(id: string) {
 
 function CanvasScene({
   artifacts,
-  canvasId,
   onArtifactsChanged,
 }: {
   artifacts: ArtifactRecord[];
-  canvasId: string;
   onArtifactsChanged?: () => void;
 }) {
   const editor = useEditor();
   const renderedArtifactIdsRef = useRef<Set<string>>(new Set());
+  /** Tombstones user-deleted artifact ids synchronously so LIST_ARTIFACTS refreshes cannot recreate shapes before React state catches up. */
+  const pendingDeletedArtifactIdsRef = useRef<Set<string>>(new Set());
   const onArtifactsChangedRef = useRef(onArtifactsChanged);
   onArtifactsChangedRef.current = onArtifactsChanged;
   /** `null` until chrome.storage load finishes — avoids writing `[]` before read and wiping deletions. */
   const [deletedArtifactIds, setDeletedArtifactIds] = useState<string[] | null>(
     null,
   );
+
+  const buildMergedDeletedSet = (stateList: string[] | null) => {
+    const merged = new Set<string>(stateList ?? []);
+    for (const id of pendingDeletedArtifactIdsRef.current) {
+      merged.add(id);
+    }
+    return merged;
+  };
   const pageShapeSig = useValue(
     "page-shapes-signature",
     () => Array.from(editor.getCurrentPageShapeIds()).join("|"),
     [editor],
   );
-
-  useEffect(() => {
-    renderedArtifactIdsRef.current = new Set();
-  }, [canvasId]);
 
   useEffect(() => {
     setDeletedArtifactIds(null);
@@ -114,7 +119,7 @@ function CanvasScene({
           string,
           string[]
         >;
-        setDeletedArtifactIds(all[canvasId] ?? []);
+        setDeletedArtifactIds(all[MAIN_DOCUMENT_ID] ?? []);
       })
       .catch(() => {
         if (!cancelled) setDeletedArtifactIds([]);
@@ -122,7 +127,7 @@ function CanvasScene({
     return () => {
       cancelled = true;
     };
-  }, [canvasId]);
+  }, []);
 
   useEffect(() => {
     if (deletedArtifactIds === null) return;
@@ -132,29 +137,32 @@ function CanvasScene({
         string,
         string[]
       >;
-      all[canvasId] = unique;
+      all[MAIN_DOCUMENT_ID] = unique;
       void chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
     });
-  }, [canvasId, deletedArtifactIds]);
+  }, [deletedArtifactIds]);
 
   useEffect(() => {
     if (!editor) return;
     editor.selectNone();
-  }, [canvasId, editor]);
+  }, [editor]);
 
   useEffect(() => {
-    if (!editor || !canvasId) return;
+    if (!editor) return;
     return editor.sideEffects.registerAfterDeleteHandler("shape", (shape) => {
       const sid = String(shape.id);
       if (!sid.startsWith("shape:artifact_")) return;
       const artifactId = sid.replace(/^shape:/, "");
+      pendingDeletedArtifactIdsRef.current.add(artifactId);
       void (async () => {
         const msg = (await chrome.runtime.sendMessage({
           type: "DELETE_ARTIFACT",
-          canvasId,
           artifactId,
         } as RuntimeMessage)) as { ok?: boolean };
-        if (!msg?.ok) return;
+        if (!msg?.ok) {
+          pendingDeletedArtifactIdsRef.current.delete(artifactId);
+          return;
+        }
         setDeletedArtifactIds((prev) => {
           const list = prev ?? [];
           return list.filter((id) => id !== artifactId);
@@ -162,11 +170,20 @@ function CanvasScene({
         onArtifactsChangedRef.current?.();
       })();
     });
-  }, [editor, canvasId]);
+  }, [editor]);
+
+  /** Drop optimistic tombstones once the artifact row is gone from the latest list (successful delete or prune). */
+  useEffect(() => {
+    const ids = new Set(artifacts.map((a) => a.id));
+    const pending = pendingDeletedArtifactIdsRef.current;
+    for (const id of [...pending]) {
+      if (!ids.has(id)) pending.delete(id);
+    }
+  }, [artifacts]);
 
   useEffect(() => {
     if (!editor || deletedArtifactIds === null) return;
-    const deletedSet = new Set(deletedArtifactIds);
+    const deletedSet = buildMergedDeletedSet(deletedArtifactIds);
     const maybeMarkDeleted = (
       artifact: ArtifactRecord,
       primaryShapeId: string,
@@ -174,6 +191,7 @@ function CanvasScene({
       if (!renderedArtifactIdsRef.current.has(artifact.id)) return;
       if (editor.getShape(primaryShapeId as any)) return;
       if (deletedSet.has(artifact.id)) return;
+      pendingDeletedArtifactIdsRef.current.add(artifact.id);
       setDeletedArtifactIds((prev) => {
         const list = prev ?? [];
         return list.includes(artifact.id) ? list : [...list, artifact.id];
@@ -183,11 +201,11 @@ function CanvasScene({
       if (deletedSet.has(artifact.id)) continue;
       maybeMarkDeleted(artifact, String(toShapeId(artifact.id)));
     }
-  }, [artifacts, canvasId, deletedArtifactIds, editor, pageShapeSig]);
+  }, [artifacts, deletedArtifactIds, editor, pageShapeSig]);
 
   useEffect(() => {
     if (!editor || deletedArtifactIds === null) return;
-    const deletedSet = new Set(deletedArtifactIds);
+    const deletedSet = buildMergedDeletedSet(deletedArtifactIds);
 
     artifacts.forEach((artifact, index) => {
       if (deletedSet.has(artifact.id)) return;
@@ -523,7 +541,7 @@ function CanvasScene({
       });
       renderedArtifactIdsRef.current.add(artifact.id);
     });
-  }, [artifacts, canvasId, deletedArtifactIds, editor]);
+  }, [artifacts, deletedArtifactIds, editor]);
   return null;
 }
 
@@ -671,21 +689,6 @@ function ImageToolbarWithUrl() {
   );
 }
 
-function formatEditedAgo(updatedAt: number): string {
-  const sec = Math.floor((Date.now() - updatedAt) / 1000);
-  if (sec < 45) return "Edited just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) {
-    return min <= 1 ? "Edited 1 min ago" : `Edited ${min} min ago`;
-  }
-  const hr = Math.floor(min / 60);
-  if (hr < 24) {
-    return hr === 1 ? "Edited 1 hr ago" : `Edited ${hr} hr ago`;
-  }
-  const days = Math.floor(hr / 24);
-  return days === 1 ? "Edited 1 day ago" : `Edited ${days} days ago`;
-}
-
 function CaptureSourceContextToolbar() {
   const editor = useEditor();
   const captureSource = useValue(
@@ -802,46 +805,43 @@ function VideoToolbarWithUrl() {
 }
 
 export function ResearchCanvasApp() {
-  const [canvases, setCanvases] = useState<CanvasRecord[]>([]);
-  const [activeCanvasId, setActiveCanvasId] = useState<string>("");
-  const [isCanvasListOpen, setIsCanvasListOpen] = useState<boolean>(false);
-  const [hoveredCanvasId, setHoveredCanvasId] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
-  /** False until first LIST_CANVASES + active canvas + artifacts resolve — avoids tldraw using `canvas-v2-default` before we know the real id (reload / extension restart bug). */
   const [sessionReady, setSessionReady] = useState(false);
-  /** Invalidates in-flight artifact loads when switching canvases quickly. */
   const loadArtifactsSeq = useRef(0);
-  const refreshCanvasesRef = useRef<(preferCanvasId?: string) => Promise<void>>(
-    async () => {},
-  );
-  const [listNewCanvasName, setListNewCanvasName] = useState("");
-  const [status, setStatus] = useState<string>("Ready");
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(
-    window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
-  );
+  const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
+
+  const loadArtifacts = useCallback(async () => {
+    const seq = (loadArtifactsSeq.current += 1);
+    const res = (await chrome.runtime.sendMessage({
+      type: "LIST_ARTIFACTS",
+    } as RuntimeMessage)) as { ok: boolean; artifacts: ArtifactRecord[] };
+    if (seq !== loadArtifactsSeq.current) return;
+    if (res.ok) setArtifacts(res.artifacts);
+  }, []);
+
+  loadArtifactsRef.current = loadArtifacts;
 
   useEffect(() => {
     void chrome.storage.local.remove("pendingCaptureRequest");
-    void refreshCanvases();
-  }, []);
-
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = (event: MediaQueryListEvent) =>
-      setIsDarkMode(event.matches);
-    setIsDarkMode(media.matches);
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, []);
-
-  useEffect(() => {
-    if (!activeCanvasId) return;
-    void chrome.storage.local.set({ lastActiveCanvasId: activeCanvasId });
-  }, [activeCanvasId]);
+    let cancelled = false;
+    void (async () => {
+      await mergeDeletedArtifactTombstones();
+      if (cancelled) return;
+      await loadArtifacts();
+      if (!cancelled) setSessionReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadArtifacts]);
 
   useEffect(() => {
     const heartbeat = () => {
-      void chrome.storage.local.set({ sidePanelHeartbeatAt: Date.now() });
+      const now = Date.now();
+      void chrome.storage.local.set({ sidePanelHeartbeatAt: now });
+      void chrome.runtime.sendMessage({
+        type: "SIDE_PANEL_HEARTBEAT",
+      } as RuntimeMessage);
     };
     heartbeat();
     const interval = window.setInterval(heartbeat, 2000);
@@ -849,6 +849,9 @@ export function ResearchCanvasApp() {
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
         void chrome.storage.local.remove("sidePanelHeartbeatAt");
+        void chrome.runtime.sendMessage({
+          type: "SIDE_PANEL_HIDDEN",
+        } as RuntimeMessage);
       } else {
         heartbeat();
       }
@@ -858,6 +861,9 @@ export function ResearchCanvasApp() {
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(interval);
       void chrome.storage.local.remove("sidePanelHeartbeatAt");
+      void chrome.runtime.sendMessage({
+        type: "SIDE_PANEL_HIDDEN",
+      } as RuntimeMessage);
     };
   }, []);
 
@@ -868,314 +874,30 @@ export function ResearchCanvasApp() {
         return;
       }
       if (msg.type === "OPEN_CANVAS") {
-        setActiveCanvasId(msg.canvasId);
-        void loadArtifactsForCanvas(msg.canvasId);
-        void refreshCanvasesRef.current(msg.canvasId);
+        void loadArtifactsRef.current();
       }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  const activeCanvas = useMemo(
-    () => canvases.find((canvas) => canvas.id === activeCanvasId) ?? null,
-    [canvases, activeCanvasId],
-  );
-
-  const onTldrawMount = useCallback(
-    (editor: Editor) => {
-      migrateLegacyYoutubeEmbedUrls(editor);
-      if (!activeCanvasId) return;
-      const gridSeededKey = `research-canvas-grid-seeded-v1-${activeCanvasId}`;
-      try {
-        if (!localStorage.getItem(gridSeededKey)) {
-          editor.updateInstanceState({ isGridMode: true });
-          localStorage.setItem(gridSeededKey, "1");
-        }
-      } catch {
-        editor.updateInstanceState({ isGridMode: true });
-      }
-    },
-    [activeCanvasId],
-  );
-
-  /** Prefer `lastActiveCanvasId` from storage so reopening the side panel restores the last opened/edited canvas. */
-  async function refreshCanvases(preferCanvasId?: string) {
+  const onTldrawMount = useCallback((editor: Editor) => {
+    migrateLegacyYoutubeEmbedUrls(editor);
+    const gridSeededKey = `research-canvas-grid-seeded-v1-${MAIN_DOCUMENT_ID}`;
     try {
-      const res = (await chrome.runtime.sendMessage({
-        type: "LIST_CANVASES",
-      } as any)) as {
-        ok: boolean;
-        canvases: CanvasRecord[];
-      };
-      if (!res.ok) return;
-      setCanvases(res.canvases);
-      const saved = (await chrome.storage.local.get("lastActiveCanvasId"))
-        .lastActiveCanvasId as string | undefined;
-      const preferredCanvasId =
-        (preferCanvasId &&
-          res.canvases.some((canvas) => canvas.id === preferCanvasId) &&
-          preferCanvasId) ||
-        (activeCanvasId &&
-          res.canvases.some((canvas) => canvas.id === activeCanvasId) &&
-          activeCanvasId) ||
-        (saved &&
-          res.canvases.some((canvas) => canvas.id === saved) &&
-          saved) ||
-        res.canvases[0]?.id;
-      if (preferredCanvasId) {
-        setActiveCanvasId(preferredCanvasId);
-        await loadArtifactsForCanvas(preferredCanvasId);
-      } else {
-        setActiveCanvasId("");
-        setArtifacts([]);
+      if (!localStorage.getItem(gridSeededKey)) {
+        editor.updateInstanceState({ isGridMode: true });
+        localStorage.setItem(gridSeededKey, "1");
       }
-    } finally {
-      setSessionReady(true);
+    } catch {
+      editor.updateInstanceState({ isGridMode: true });
     }
-  }
+  }, []);
 
-  async function loadArtifactsForCanvas(canvasId: string) {
-    const seq = (loadArtifactsSeq.current += 1);
-    setArtifacts([]);
-    const res = (await chrome.runtime.sendMessage({
-      type: "LIST_ARTIFACTS",
-      canvasId,
-    } as any)) as { ok: boolean; artifacts: ArtifactRecord[] };
-    if (seq !== loadArtifactsSeq.current) return;
-    if (res.ok) setArtifacts(res.artifacts);
-  }
-
-  async function createCanvasFromList() {
-    const name = listNewCanvasName.trim();
-    if (!name) return;
-    const res = (await chrome.runtime.sendMessage({
-      type: "CREATE_CANVAS",
-      name,
-    } as RuntimeMessage)) as {
-      ok: boolean;
-      canvas?: CanvasRecord;
-    };
-    if (!res.ok || !res.canvas) return;
-    setListNewCanvasName("");
-    await refreshCanvases();
-    setActiveCanvasId(res.canvas.id);
-    await loadArtifactsForCanvas(res.canvas.id);
-  }
-
-  async function deleteCanvasFromList(canvasId: string) {
-    const confirmed = window.confirm("Delete this canvas and its saved items?");
-    if (!confirmed) return;
-    const res = (await chrome.runtime.sendMessage({
-      type: "DELETE_CANVAS",
-      canvasId,
-    } as RuntimeMessage)) as { ok: boolean; canvases?: CanvasRecord[] };
-    if (!res.ok) return;
-    const nextCanvases = res.canvases ?? [];
-    setCanvases(nextCanvases);
-    const fallbackCanvasId = nextCanvases[0]?.id ?? "";
-    if (activeCanvasId === canvasId) {
-      setActiveCanvasId(fallbackCanvasId);
-      if (fallbackCanvasId) await loadArtifactsForCanvas(fallbackCanvasId);
-      else setArtifacts([]);
-    } else {
-      await refreshCanvases();
-    }
-  }
-
-  refreshCanvasesRef.current = refreshCanvases;
-
-  const sidebarSurface = isDarkMode ? "#111318" : "#ffffff";
-  const sidebarBorder = isDarkMode ? "#2a2f3a" : "#dddddd";
-  const sidebarMuted = isDarkMode ? "#9aa3b2" : "#555555";
-  const sidebarText = isDarkMode ? "#e8ecf2" : "#111827";
-  const sidebarInput = isDarkMode ? "#1a1f2b" : "#ffffff";
-  const rowHoverBg = isDarkMode ? "#1a2230" : "#f3f4f6";
-  const activeBg = isDarkMode ? "#1e293b" : "#eef2ff";
-  const activeBorder = isDarkMode ? "#6366f1" : "#4338ca";
+  const muted = "#555555";
 
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw" }}>
-      <div
-        style={{
-          position: "fixed",
-          bottom: 12,
-          left: 12,
-          zIndex: 1000,
-          display: "flex",
-          gap: 8,
-          alignItems: "center",
-        }}
-      >
-        <button
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: 8,
-            border: `1px solid ${sidebarBorder}`,
-            background: sidebarInput,
-            color: sidebarText,
-            fontSize: 18,
-          }}
-          onClick={() => setIsCanvasListOpen((prev) => !prev)}
-          title={isCanvasListOpen ? "Hide canvases" : "Show canvases"}
-        >
-          {isCanvasListOpen ? "×" : "☰"}
-        </button>
-      </div>
-      {isCanvasListOpen && (
-        <aside
-          style={{
-            width: 260,
-            borderRight: `1px solid ${sidebarBorder}`,
-            padding: "56px 12px 12px",
-            overflow: "auto",
-            fontFamily: "Inter, system-ui, sans-serif",
-            background: sidebarSurface,
-            color: sidebarText,
-          }}
-        >
-          <h3 style={{ marginTop: 0 }}>Research Canvases</h3>
-          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <input
-              value={listNewCanvasName}
-              onChange={(event) => setListNewCanvasName(event.target.value)}
-              placeholder="New canvas"
-              style={{
-                flex: 1,
-                padding: "8px 10px",
-                border: `1px solid ${sidebarBorder}`,
-                borderRadius: 8,
-                background: sidebarInput,
-                color: sidebarText,
-              }}
-            />
-            <button
-              onClick={() => void createCanvasFromList()}
-              title="Create canvas"
-              style={{
-                width: 34,
-                borderRadius: 8,
-                border: `1px solid ${sidebarBorder}`,
-                background: sidebarInput,
-                color: sidebarText,
-              }}
-            >
-              +
-            </button>
-          </div>
-          {canvases.map((canvas) => {
-            const isActive = canvas.id === activeCanvasId;
-            const isHovered = hoveredCanvasId === canvas.id;
-            const rowBg = isActive
-              ? activeBg
-              : isHovered
-                ? rowHoverBg
-                : sidebarInput;
-            const rowBorder = isActive
-              ? `1px solid ${activeBorder}`
-              : `1px solid ${sidebarBorder}`;
-            return (
-              <div
-                key={canvas.id}
-                style={{ display: "flex", gap: 6, marginBottom: 8 }}
-                onMouseEnter={() => setHoveredCanvasId(canvas.id)}
-                onMouseLeave={() =>
-                  setHoveredCanvasId((id) => (id === canvas.id ? null : id))
-                }
-              >
-                <button
-                  type="button"
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-start",
-                    flex: 1,
-                    textAlign: "left",
-                    padding: "8px 10px",
-                    borderRadius: 8,
-                    border: rowBorder,
-                    borderLeft: isActive ? `3px solid ${activeBorder}` : rowBorder,
-                    background: rowBg,
-                    color: sidebarText,
-                    cursor: "pointer",
-                    minWidth: 0,
-                  }}
-                  onClick={() => {
-                    setActiveCanvasId(canvas.id);
-                    void loadArtifactsForCanvas(canvas.id);
-                  }}
-                >
-                  <span
-                    style={{
-                      fontWeight: isActive ? 600 : 500,
-                      lineHeight: 1.3,
-                      width: "100%",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {canvas.name}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: sidebarMuted,
-                      marginTop: 2,
-                    }}
-                  >
-                    {formatEditedAgo(canvas.updatedAt)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  title="Delete canvas"
-                  aria-label="Delete canvas"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void deleteCanvasFromList(canvas.id);
-                  }}
-                  style={{
-                    width: 36,
-                    height: "auto",
-                    minHeight: 52,
-                    alignSelf: "stretch",
-                    borderRadius: 8,
-                    border: `1px solid ${sidebarBorder}`,
-                    background: isHovered ? rowHoverBg : sidebarInput,
-                    color: isHovered ? "#ef4444" : sidebarMuted,
-                    cursor: "pointer",
-                    display: "grid",
-                    placeItems: "center",
-                    flexShrink: 0,
-                  }}
-                >
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
-                  >
-                    <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6" />
-                  </svg>
-                </button>
-              </div>
-            );
-          })}
-          <p style={{ color: sidebarMuted, fontSize: 12 }}>{status}</p>
-          {activeCanvas && (
-            <p style={{ color: sidebarMuted, fontSize: 12 }}>
-              Active: {activeCanvas.name}
-            </p>
-          )}
-        </aside>
-      )}
       <main style={{ flex: 1, minHeight: 0 }}>
         {!sessionReady ? (
           <div
@@ -1183,30 +905,16 @@ export function ResearchCanvasApp() {
               display: "grid",
               placeItems: "center",
               height: "100%",
-              color: sidebarMuted,
+              color: muted,
               fontFamily: "system-ui, sans-serif",
               fontSize: 14,
             }}
           >
-            Loading canvas…
-          </div>
-        ) : !activeCanvasId ? (
-          <div
-            style={{
-              display: "grid",
-              placeItems: "center",
-              height: "100%",
-              color: sidebarMuted,
-              fontFamily: "system-ui, sans-serif",
-              fontSize: 14,
-            }}
-          >
-            No canvas found. Create one from the list.
+            Loading…
           </div>
         ) : (
           <Tldraw
-            key={activeCanvasId}
-            persistenceKey={`canvas-v2-${activeCanvasId}`}
+            persistenceKey={`canvas-v2-${MAIN_DOCUMENT_ID}`}
             embeds={RESEARCH_EMBED_DEFINITIONS}
             shapeUtils={RESEARCH_SHAPE_UTILS}
             onMount={onTldrawMount}
@@ -1217,9 +925,8 @@ export function ResearchCanvasApp() {
           >
             <CanvasScene
               artifacts={artifacts}
-              canvasId={activeCanvasId}
               onArtifactsChanged={() => {
-                void loadArtifactsForCanvas(activeCanvasId);
+                void loadArtifacts();
               }}
             />
             <CaptureSourceContextToolbar />

@@ -8,6 +8,35 @@ const TOOLBAR_POS_KEY = "research-canvas-float-toolbar-pos";
 const TOOLTIP_EL_ID = "research-canvas-toolbar-tooltip";
 export const FLOATING_TOOLBAR_HIDDEN_KEY = "floatingToolbarHidden";
 
+/** Content inset; icon hit targets are fixed size below. */
+const TOOLBAR_INNER_PADDING = "4px";
+const TOOLBAR_ICON_BTN_SIZE = "40px";
+const TOOLBAR_ICON_HOVER_BG = "#e5e7eb";
+/** Rendered pixel size for toolbar SVGs (viewBox stays 24×24 / 26×26). */
+const TOOLBAR_SVG_SIZE_FILLED = "24";
+const TOOLBAR_SVG_SIZE_STROKE = "24";
+
+function styleFloatingToolbarIconButton(btn: HTMLButtonElement): void {
+  Object.assign(btn.style, {
+    display: "grid",
+    placeItems: "center",
+    width: TOOLBAR_ICON_BTN_SIZE,
+    height: TOOLBAR_ICON_BTN_SIZE,
+    padding: "0",
+    border: "none",
+    borderRadius: "8px",
+    background: "transparent",
+    color: "#111827",
+    cursor: "pointer",
+  });
+  btn.onmouseenter = () => {
+    btn.style.background = TOOLBAR_ICON_HOVER_BG;
+  };
+  btn.onmouseleave = () => {
+    btn.style.background = "transparent";
+  };
+}
+
 let tooltipShowTimer: number | undefined;
 
 /**
@@ -120,6 +149,14 @@ const ICON_TOGGLE_SIDE_PANEL =
   "m12.748 4.001-.001.002h7.498c.967 0 1.75.784 1.75 1.75v12.495a1.75 1.75 0 0 1-1.75 1.75h-8.997l-.001-.002H3.75A1.75 1.75 0 0 1 2 18.246V5.751c0-.967.784-1.75 1.75-1.75h8.998Zm7.497 1.502h-7.497v12.995h7.497a.25.25 0 0 0 .25-.25V5.754a.25.25 0 0 0-.25-.25Zm-8.997-.002H3.75a.25.25 0 0 0-.25.25v12.495c0 .138.112.25.25.25h7.498V5.501Zm7.502.999a.75.75 0 0 1 0 1.5h-4.502a.75.75 0 0 1 0-1.5h4.502Z";
 /** Stroked X — hide toolbar (fill-only svg would not draw line paths). */
 const ICON_HIDE_STROKE = "M6 6l12 12M18 6L6 18";
+
+/** Pause (two bars) — filled, 24×24 viewBox. */
+const ICON_RECORD_PAUSE = "M6 5h4v14H6V5zm8 0h4v14h-4V5z";
+/** Play triangle — filled. */
+const ICON_RECORD_PLAY = "M8 5v14l11-7z";
+/** Checkmark — finish / save recording. */
+const ICON_RECORD_DONE =
+  "M9 16.17L4.83 12l-1.42 1.41L9 19L21 7l-1.41-1.41L9 16.17z";
 
 type ToolbarAction =
   | "capture-area-image"
@@ -305,8 +342,8 @@ function attachToolbarDrag(root: HTMLElement): void {
 function svgIcon(pathD: string): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "18");
-  svg.setAttribute("height", "18");
+  svg.setAttribute("width", TOOLBAR_SVG_SIZE_FILLED);
+  svg.setAttribute("height", TOOLBAR_SVG_SIZE_FILLED);
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("fill", "currentColor");
   svg.setAttribute("aria-hidden", "true");
@@ -319,8 +356,8 @@ function svgIcon(pathD: string): SVGSVGElement {
 function svgIconStroke(pathD: string): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "20");
+  svg.setAttribute("width", TOOLBAR_SVG_SIZE_STROKE);
+  svg.setAttribute("height", TOOLBAR_SVG_SIZE_STROKE);
   svg.setAttribute("viewBox", "0 0 26 26");
   svg.setAttribute("fill", "none");
   svg.setAttribute("aria-hidden", "true");
@@ -366,7 +403,8 @@ export function mountFloatingCaptureToolbar(options?: {
     maxHeight: "min(100vh - 24px, 560px)",
     overflowY: "auto",
     padding: "0",
-    borderRadius: "12px",
+    paddingBottom: "6px",
+    borderRadius: "8px",
     background: "#ffffff",
     boxShadow:
       "0 4px 6px -1px rgba(0,0,0,0.08), 0 10px 24px -4px rgba(0,0,0,0.1)",
@@ -393,7 +431,7 @@ export function mountFloatingCaptureToolbar(options?: {
   handle.setAttribute("aria-label", "Drag to move toolbar");
   Object.assign(handle.style, {
     flexShrink: "0",
-    padding: "6px 10px 4px",
+    padding: "10px 8px 10px",
     cursor: "grab",
     userSelect: "none",
     touchAction: "none",
@@ -404,7 +442,7 @@ export function mountFloatingCaptureToolbar(options?: {
   const grip = document.createElement("div");
   Object.assign(grip.style, {
     height: "4px",
-    width: "28px",
+    width: "16px",
     margin: "0 auto",
     borderRadius: "2px",
     background:
@@ -417,24 +455,25 @@ export function mountFloatingCaptureToolbar(options?: {
 
   const inner = document.createElement("div");
   Object.assign(inner.style, {
-    padding: "8px 10px",
+    padding: TOOLBAR_INNER_PADDING,
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
-    gap: "6px",
+    gap: "4px",
   });
   root.append(inner);
 
   const utilityRow = document.createElement("div");
+  utilityRow.setAttribute("data-research-canvas-toolbar-utility-row", "");
   Object.assign(utilityRow.style, {
     display: "flex",
     flexDirection: "column",
     flexWrap: "nowrap",
     alignItems: "center",
-    gap: "6px",
+    gap: "4px",
     width: "100%",
-    paddingBottom: "6px",
-    marginBottom: "2px",
+    paddingBottom: "4px",
+    marginBottom: "0",
     borderBottom: "1px solid #e5e7eb",
   });
 
@@ -446,27 +485,10 @@ export function mountFloatingCaptureToolbar(options?: {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute("aria-label", tooltip);
-    Object.assign(btn.style, {
-      display: "grid",
-      placeItems: "center",
-      width: "36px",
-      height: "36px",
-      padding: "0",
-      border: "none",
-      borderRadius: "8px",
-      background: "#f3f4f6",
-      color: "#111827",
-      cursor: "pointer",
-    });
+    styleFloatingToolbarIconButton(btn);
     btn.append(icon);
     disableSvgPointerEvents(btn);
     bindHoverTooltip(btn, tooltip);
-    btn.onmouseenter = () => {
-      btn.style.background = "#e5e7eb";
-    };
-    btn.onmouseleave = () => {
-      btn.style.background = "#f3f4f6";
-    };
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -497,10 +519,11 @@ export function mountFloatingCaptureToolbar(options?: {
   inner.append(utilityRow);
 
   const bar = document.createElement("div");
+  bar.setAttribute("data-research-canvas-toolbar-capture-buttons", "");
   bar.style.display = "flex";
   bar.style.flexDirection = "column";
   bar.style.flexWrap = "nowrap";
-  bar.style.gap = "6px";
+  bar.style.gap = "4px";
   bar.style.alignItems = "center";
   inner.append(bar);
 
@@ -513,27 +536,10 @@ export function mountFloatingCaptureToolbar(options?: {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("aria-label", def.title);
-      Object.assign(btn.style, {
-        display: "grid",
-        placeItems: "center",
-        width: "36px",
-        height: "36px",
-        padding: "0",
-        border: "none",
-        borderRadius: "8px",
-        background: "#f3f4f6",
-        color: "#111827",
-        cursor: "pointer",
-      });
+      styleFloatingToolbarIconButton(btn);
       btn.append(svgIcon(def.path));
       disableSvgPointerEvents(btn);
       bindHoverTooltip(btn, def.title);
-      btn.onmouseenter = () => {
-        btn.style.background = "#e5e7eb";
-      };
-      btn.onmouseleave = () => {
-        btn.style.background = "#f3f4f6";
-      };
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -564,4 +570,277 @@ export function mountFloatingCaptureToolbar(options?: {
   window.addEventListener("resize", onResize);
 
   attachToolbarDrag(root);
+}
+
+const RECORDING_STRIP_ATTR = "data-research-canvas-toolbar-recording-strip";
+const FALLBACK_PANEL_ID = "research-canvas-recording-fallback-panel";
+
+function preventFocusScrollOnClick(button: HTMLButtonElement): void {
+  button.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+  });
+}
+
+function styleToolbarActionButton(
+  btn: HTMLButtonElement,
+  variant: "default" | "primary",
+): void {
+  Object.assign(btn.style, {
+    display: "grid",
+    placeItems: "center",
+    width: TOOLBAR_ICON_BTN_SIZE,
+    height: TOOLBAR_ICON_BTN_SIZE,
+    padding: "0",
+    border: "none",
+    borderRadius: "8px",
+    cursor: "pointer",
+  });
+  if (variant === "primary") {
+    btn.style.background = "#4f46e5";
+    btn.style.color = "#fff";
+    btn.style.boxShadow = "0 1px 3px rgba(79, 70, 229, 0.35)";
+    btn.onmouseenter = () => {
+      btn.style.background = "#4338ca";
+    };
+    btn.onmouseleave = () => {
+      btn.style.background = "#4f46e5";
+    };
+  } else {
+    btn.style.background = "transparent";
+    btn.style.color = "#111827";
+    btn.onmouseenter = () => {
+      btn.style.background = TOOLBAR_ICON_HOVER_BG;
+    };
+    btn.onmouseleave = () => {
+      btn.style.background = "transparent";
+    };
+  }
+}
+
+function setPauseButtonIcon(
+  btn: HTMLButtonElement,
+  showPlayIcon: boolean,
+): void {
+  btn.replaceChildren(
+    showPlayIcon ? svgIcon(ICON_RECORD_PLAY) : svgIcon(ICON_RECORD_PAUSE),
+  );
+  disableSvgPointerEvents(btn);
+}
+
+/**
+ * Recording controls in the floating toolbar (below capture buttons), or a bottom bar if the toolbar is hidden.
+ * Icon buttons match toolbar items; styled tooltips; auto-start recording.
+ */
+export function showToolbarRecordingControls(
+  recorder: MediaRecorder,
+  removeOutline: () => void,
+): Promise<"done" | "cancelled"> {
+  return new Promise((resolve) => {
+    const statusDot = document.createElement("span");
+    Object.assign(statusDot.style, {
+      width: "8px",
+      height: "8px",
+      borderRadius: "50%",
+      background: "#dc2626",
+      flexShrink: "0",
+    });
+
+    const timer = document.createElement("span");
+    timer.textContent = "00:00";
+    Object.assign(timer.style, {
+      minWidth: "38px",
+      textAlign: "center",
+      fontSize: "12px",
+      fontVariantNumeric: "tabular-nums",
+      fontWeight: "600",
+      color: "#111827",
+    });
+
+    const metaRow = document.createElement("div");
+    Object.assign(metaRow.style, {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "10px",
+      width: "100%",
+      paddingTop: "10px",
+    });
+    metaRow.append(statusDot, timer);
+
+    const pauseBtn = document.createElement("button");
+    pauseBtn.type = "button";
+    pauseBtn.setAttribute("aria-label", "Pause or resume recording");
+    styleToolbarActionButton(pauseBtn, "default");
+    setPauseButtonIcon(pauseBtn, false);
+    bindHoverTooltip(pauseBtn, "Pause or resume recording");
+    preventFocusScrollOnClick(pauseBtn);
+
+    const doneBtn = document.createElement("button");
+    doneBtn.type = "button";
+    doneBtn.setAttribute("aria-label", "Finish and save recording");
+    styleToolbarActionButton(doneBtn, "primary");
+    doneBtn.append(svgIcon(ICON_RECORD_DONE));
+    disableSvgPointerEvents(doneBtn);
+    bindHoverTooltip(doneBtn, "Finish and save recording to Research Canvas");
+    preventFocusScrollOnClick(doneBtn);
+
+    bindHoverTooltip(timer, "Elapsed recording time");
+    bindHoverTooltip(
+      statusDot,
+      "Recording in progress (red = active, amber = paused)",
+    );
+
+    const root = document.getElementById(TOOLBAR_ID);
+    const captureBar = root?.querySelector<HTMLElement>(
+      "[data-research-canvas-toolbar-capture-buttons]",
+    );
+
+    let removeUi: () => void;
+
+    if (root && captureBar) {
+      const strip = document.createElement("div");
+      strip.setAttribute(RECORDING_STRIP_ATTR, "");
+      Object.assign(strip.style, {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: "4px",
+        width: "100%",
+        paddingTop: "4px",
+        marginTop: "2px",
+        borderTop: "1px solid #fecaca",
+        background: "#ffffff",
+      });
+      strip.append(metaRow, pauseBtn, doneBtn);
+      captureBar.insertAdjacentElement("afterend", strip);
+      requestAnimationFrame(() => {
+        root.scrollTop = root.scrollHeight;
+      });
+      const prevOp = captureBar.style.opacity;
+      const prevPe = captureBar.style.pointerEvents;
+      captureBar.style.opacity = "0.45";
+      captureBar.style.pointerEvents = "none";
+      removeUi = () => {
+        strip.remove();
+        captureBar.style.opacity = prevOp;
+        captureBar.style.pointerEvents = prevPe;
+      };
+    } else {
+      timer.style.color = "#e5e7eb";
+      statusDot.style.boxShadow = "0 0 0 1px rgba(255,255,255,0.35)";
+      const panel = document.createElement("div");
+      panel.id = FALLBACK_PANEL_ID;
+      Object.assign(panel.style, {
+        position: "fixed",
+        bottom: "16px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: "2147483647",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: "8px",
+        padding: "10px 12px",
+        borderRadius: "12px",
+        background: "rgba(17,24,39,0.95)",
+        color: "#fff",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        fontSize: "13px",
+        boxShadow: "0 8px 22px rgba(0,0,0,0.35)",
+      });
+      const fallbackMeta = document.createElement("div");
+      Object.assign(fallbackMeta.style, {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: "4px",
+      });
+      fallbackMeta.append(statusDot, timer);
+      panel.append(fallbackMeta, pauseBtn, doneBtn);
+      appendToBody(panel);
+      removeUi = () => panel.remove();
+    }
+
+    const savedScroll = { x: window.scrollX, y: window.scrollY };
+    const restoreScroll = () => {
+      window.scrollTo({
+        left: savedScroll.x,
+        top: savedScroll.y,
+        behavior: "instant",
+      });
+    };
+    queueMicrotask(restoreScroll);
+    requestAnimationFrame(restoreScroll);
+    requestAnimationFrame(() => requestAnimationFrame(restoreScroll));
+
+    let startedAt = 0;
+    let pausedMs = 0;
+    let pausedAt = 0;
+    let timerId = 0;
+
+    const cleanup = () => {
+      removeOutline();
+      removeUi();
+      window.clearInterval(timerId);
+    };
+
+    const updateTimer = () => {
+      if (!startedAt) return;
+      const now = Date.now();
+      const elapsed =
+        now - startedAt - pausedMs - (pausedAt ? now - pausedAt : 0);
+      const sec = Math.max(0, Math.floor(elapsed / 1000));
+      const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+      const ss = String(sec % 60).padStart(2, "0");
+      timer.textContent = `${mm}:${ss}`;
+    };
+
+    try {
+      recorder.start();
+    } catch (e) {
+      window.alert(
+        e instanceof Error ? e.message : "Could not start recording.",
+      );
+      cleanup();
+      resolve("cancelled");
+      return;
+    }
+
+    startedAt = Date.now();
+    timerId = window.setInterval(updateTimer, 250);
+
+    pauseBtn.onclick = () => {
+      if (recorder.state === "recording") {
+        recorder.pause();
+        pausedAt = Date.now();
+        statusDot.style.background = "#d97706";
+        setPauseButtonIcon(pauseBtn, true);
+        return;
+      }
+      if (recorder.state === "paused") {
+        recorder.resume();
+        if (pausedAt) {
+          pausedMs += Date.now() - pausedAt;
+          pausedAt = 0;
+        }
+        statusDot.style.background = "#dc2626";
+        setPauseButtonIcon(pauseBtn, false);
+      }
+    };
+
+    doneBtn.onclick = () => {
+      if (recorder.state === "inactive") {
+        cleanup();
+        resolve("cancelled");
+        return;
+      }
+      recorder.onstop = () => {
+        cleanup();
+        resolve("done");
+      };
+      recorder.stop();
+    };
+  });
 }

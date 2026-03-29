@@ -2,6 +2,7 @@ import type { RuntimeMessage } from "@shared/messages";
 import {
   FLOATING_TOOLBAR_HIDDEN_KEY,
   mountFloatingCaptureToolbar,
+  showToolbarRecordingControls,
   unmountFloatingCaptureToolbar,
 } from "./floating-capture-toolbar";
 import { chooseElementRect } from "./element-picker-overlay";
@@ -262,7 +263,7 @@ async function runTabRecordingPipeline(
     if (ev.data.size > 0) chunks.push(ev.data);
   };
 
-  const result = await showRecordingControls(recorder, removeOutline);
+  const result = await showToolbarRecordingControls(recorder, removeOutline);
   window.clearInterval(drawInterval);
   track.stop();
   stream.getAudioTracks().forEach((audioTrack) => audioTrack.stop());
@@ -380,6 +381,10 @@ function beginToolbarRecordingFromClick(
           };
         };
 
+  void chrome.runtime.sendMessage({
+    type: "ENSURE_SIDE_PANEL_OPEN",
+  } satisfies RuntimeMessage);
+
   const p = navigator.mediaDevices.getDisplayMedia({
     video: true,
     audio: true,
@@ -414,186 +419,6 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onload = () => resolve(String(reader.result));
     reader.readAsDataURL(blob);
   });
-}
-
-async function showRecordingControls(
-  recorder: MediaRecorder,
-  removeOutline: () => void,
-): Promise<"done" | "cancelled"> {
-  return new Promise((resolve) => {
-    const panel = document.createElement("div");
-    panel.style.position = "fixed";
-    panel.style.bottom = "16px";
-    panel.style.left = "50%";
-    panel.style.transform = "translateX(-50%)";
-    panel.style.zIndex = "2147483647";
-    panel.style.display = "flex";
-    panel.style.alignItems = "center";
-    panel.style.gap = "8px";
-    panel.style.padding = "10px 12px";
-    panel.style.borderRadius = "10px";
-    panel.style.background = "rgba(17,24,39,0.95)";
-    panel.style.color = "#fff";
-    panel.style.fontFamily = "system-ui, -apple-system, sans-serif";
-    panel.style.fontSize = "13px";
-    panel.style.boxShadow = "0 8px 22px rgba(0,0,0,0.35)";
-
-    const badge = document.createElement("span");
-    badge.textContent = "Ready";
-    badge.style.padding = "4px 8px";
-    badge.style.borderRadius = "999px";
-    badge.style.background = "#374151";
-
-    const timer = document.createElement("span");
-    timer.textContent = "00:00";
-    timer.style.minWidth = "40px";
-    timer.style.textAlign = "center";
-
-    const startBtn = createControlButton("Start");
-    const pauseBtn = createControlButton("Pause");
-    const doneBtn = createControlButton("Done");
-    const cancelBtn = createControlButton("Cancel");
-    pauseBtn.disabled = true;
-    doneBtn.disabled = true;
-    pauseBtn.style.opacity = "0.45";
-    doneBtn.style.opacity = "0.45";
-    panel.append(badge, timer, startBtn, pauseBtn, doneBtn, cancelBtn);
-    panel.setAttribute("data-research-canvas-recording-panel", "");
-
-    const savedScroll = { x: window.scrollX, y: window.scrollY };
-    const restoreScroll = () => {
-      window.scrollTo({ left: savedScroll.x, top: savedScroll.y, behavior: "instant" });
-    };
-
-    document.body.append(panel);
-    queueMicrotask(restoreScroll);
-    requestAnimationFrame(restoreScroll);
-    requestAnimationFrame(() => requestAnimationFrame(restoreScroll));
-
-    let startedAt = 0;
-    let pausedMs = 0;
-    let pausedAt = 0;
-    let timerId = 0;
-    let hasStarted = false;
-
-    const cleanup = () => {
-      removeOutline();
-      panel.remove();
-      window.clearInterval(timerId);
-    };
-
-    const updateTimer = () => {
-      if (!startedAt) return;
-      const now = Date.now();
-      const elapsed = now - startedAt - pausedMs - (pausedAt ? now - pausedAt : 0);
-      const sec = Math.max(0, Math.floor(elapsed / 1000));
-      const mm = String(Math.floor(sec / 60)).padStart(2, "0");
-      const ss = String(sec % 60).padStart(2, "0");
-      timer.textContent = `${mm}:${ss}`;
-    };
-
-    startBtn.onclick = () => {
-      try {
-        recorder.start();
-      } catch (e) {
-        window.alert(
-          e instanceof Error ? e.message : "Could not start recording.",
-        );
-        cleanup();
-        resolve("cancelled");
-        return;
-      }
-      hasStarted = true;
-      startedAt = Date.now();
-      badge.textContent = "Recording";
-      badge.style.background = "#dc2626";
-      timerId = window.setInterval(updateTimer, 250);
-      startBtn.style.display = "none";
-      pauseBtn.disabled = false;
-      doneBtn.disabled = false;
-      pauseBtn.style.opacity = "1";
-      doneBtn.style.opacity = "1";
-    };
-
-    pauseBtn.onclick = () => {
-      if (!hasStarted) return;
-      if (recorder.state === "recording") {
-        recorder.pause();
-        pausedAt = Date.now();
-        badge.textContent = "Paused";
-        badge.style.background = "#d97706";
-        pauseBtn.textContent = "Resume";
-        return;
-      }
-      if (recorder.state === "paused") {
-        recorder.resume();
-        if (pausedAt) {
-          pausedMs += Date.now() - pausedAt;
-          pausedAt = 0;
-        }
-        badge.textContent = "Recording";
-        badge.style.background = "#dc2626";
-        pauseBtn.textContent = "Pause";
-      }
-    };
-
-    doneBtn.onclick = () => {
-      if (!hasStarted) return;
-      if (recorder.state === "inactive") {
-        cleanup();
-        resolve("cancelled");
-        return;
-      }
-      recorder.onstop = () => {
-        cleanup();
-        resolve("done");
-      };
-      recorder.stop();
-    };
-
-    cancelBtn.onclick = () => {
-      if (!hasStarted) {
-        cleanup();
-        resolve("cancelled");
-        return;
-      }
-      if (recorder.state !== "inactive") {
-        recorder.onstop = () => {
-          cleanup();
-          resolve("cancelled");
-        };
-        recorder.stop();
-      } else {
-        cleanup();
-        resolve("cancelled");
-      }
-    };
-  });
-}
-
-function createControlButton(text: string): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = text;
-  button.style.border = "none";
-  button.style.borderRadius = "8px";
-  button.style.padding = "6px 10px";
-  button.style.background = "#111827";
-  button.style.color = "#fff";
-  button.style.cursor = "pointer";
-  button.style.fontSize = "12px";
-  button.onmouseenter = () => {
-    if (!button.disabled) button.style.background = "#1f2937";
-  };
-  button.onmouseleave = () => {
-    if (!button.disabled) button.style.background = "#111827";
-  };
-  // Avoid focus + scroll-into-view when the recording bar mounts / buttons are clicked.
-  button.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-  });
-  return button;
 }
 
 function mapRectToVideoSource(

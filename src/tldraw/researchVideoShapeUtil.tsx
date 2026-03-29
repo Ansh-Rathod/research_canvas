@@ -4,6 +4,7 @@ import {
   useEditor,
   useEditorComponents,
   useIsEditing,
+  useValue,
 } from "@tldraw/editor";
 import classNames from "classnames";
 import {
@@ -12,10 +13,11 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactEventHandler,
 } from "react";
 import { VideoShapeUtil } from "tldraw";
-import { useImageOrVideoAsset, usePrefersReducedMotion } from "tldraw";
+import { useImageOrVideoAsset } from "tldraw";
 
 function BrokenAssetIcon() {
   return (
@@ -36,9 +38,16 @@ function BrokenAssetIcon() {
   );
 }
 
+/** Touch double-tap: max ms between taps and max px movement (same as typical OS double-tap). */
+const DOUBLE_TAP_MS = 400;
+const DOUBLE_TAP_MAX_DIST_PX = 32;
+
 /**
  * Fork of tldraw's video shape: no top-right hyperlink button; centered play overlay when paused
  * so recordings read clearly as video. Hyperlink removed — use shape meta + toolbar on image only.
+ *
+ * Playback: only starts/toggles via double-click / double-tap on the video while the shape is
+ * selected; deselecting pauses. Native controls apply only in edit mode when zoomed in enough.
  */
 const ResearchVideoShape = memo(function ResearchVideoShape({
   shape,
@@ -49,8 +58,14 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
   const showControls =
     editor.getShapeGeometry(shape).bounds.w * editor.getZoomLevel() >= 110;
   const isEditing = useIsEditing(shape.id);
-  const prefersReducedMotion = usePrefersReducedMotion();
+  const editingWithControls = isEditing && showControls;
   const { Spinner } = useEditorComponents();
+
+  const isSelected = useValue(
+    "researchVideoShapeSelected",
+    () => editor.getSelectedShapeIds().includes(shape.id),
+    [editor, shape.id],
+  );
 
   const { asset, url } = useImageOrVideoAsset({
     shapeId: shape.id,
@@ -59,6 +74,9 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
   });
 
   const rVideo = useRef<HTMLVideoElement>(null!);
+  const rLastTouchTap = useRef<{ t: number; x: number; y: number } | null>(
+    null,
+  );
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [showPlayOverlay, setShowPlayOverlay] = useState(false);
@@ -97,6 +115,21 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
     };
   }, [url, isLoaded]);
 
+  const togglePlaybackFromGesture = useCallback(() => {
+    const video = rVideo.current;
+    if (!video || !isSelected || editingWithControls) return;
+    if (video.paused) void video.play();
+    else video.pause();
+  }, [editingWithControls, isSelected]);
+
+  useEffect(() => {
+    const video = rVideo.current;
+    if (!video) return;
+    if (!isSelected) {
+      video.pause();
+    }
+  }, [isSelected]);
+
   useEffect(() => {
     const video = rVideo.current;
     if (!video) return;
@@ -108,13 +141,46 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
     }
   }, [isEditing, isLoaded]);
 
-  const editingWithControls = isEditing && showControls;
   const showCenterPlay =
     isLoaded &&
     url &&
     showPlayOverlay &&
     !editingWithControls &&
     !isFullscreen;
+
+  let videoStyle: CSSProperties | undefined;
+  if (!isLoaded) {
+    videoStyle = { display: "none" };
+  } else if (isSelected || isEditing) {
+    videoStyle = {
+      pointerEvents: "all",
+      ...(isSelected ? { touchAction: "manipulation" } : {}),
+    };
+  }
+
+  const handleVideoPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLVideoElement>) => {
+      if (editingWithControls) return;
+      if (!isSelected) return;
+      if (e.pointerType === "mouse") return;
+      const now = Date.now();
+      const { clientX: x, clientY: y } = e;
+      const prev = rLastTouchTap.current;
+      if (
+        prev &&
+        now - prev.t < DOUBLE_TAP_MS &&
+        Math.hypot(x - prev.x, y - prev.y) < DOUBLE_TAP_MAX_DIST_PX
+      ) {
+        rLastTouchTap.current = null;
+        e.preventDefault();
+        e.stopPropagation();
+        togglePlaybackFromGesture();
+        return;
+      }
+      rLastTouchTap.current = { t: now, x, y };
+    },
+    [editingWithControls, isSelected, togglePlaybackFromGesture],
+  );
 
   return (
     <HTMLContainer
@@ -139,13 +205,7 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
               <video
                 key={url}
                 ref={rVideo}
-                style={
-                  isEditing
-                    ? { pointerEvents: "all" }
-                    : !isLoaded
-                      ? { display: "none" }
-                      : undefined
-                }
+                style={videoStyle}
                 className={classNames(
                   "tl-video",
                   `tl-video-shape-${shape.id.split(":")[1]}`,
@@ -157,7 +217,7 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
                 height="100%"
                 draggable={false}
                 playsInline
-                autoPlay={shape.props.autoplay && !prefersReducedMotion}
+                autoPlay={false}
                 muted
                 loop
                 disableRemotePlayback
@@ -166,22 +226,21 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
                 onLoadedData={handleLoadedData}
                 hidden={!isLoaded}
                 aria-label={shape.props.altText}
+                onPointerUp={handleVideoPointerUp}
+                onDoubleClick={(e) => {
+                  if (editingWithControls) return;
+                  e.stopPropagation();
+                  togglePlaybackFromGesture();
+                }}
               >
                 <source src={url} />
               </video>
               {!isLoaded && Spinner && <Spinner />}
               {showCenterPlay ? (
-                <button
-                  type="button"
+                <div
                   className="research-video-play-overlay"
-                  aria-label="Play video"
-                  onPointerDown={(e) => {
-                    stopEventPropagationSafe(e);
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void rVideo.current?.play();
-                  }}
+                  aria-hidden
+                  role="presentation"
                 >
                   <svg
                     className="research-video-play-icon"
@@ -191,7 +250,7 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
                   >
                     <path d="M8 5v14l11-7z" />
                   </svg>
-                </button>
+                </div>
               ) : null}
             </>
           ) : null}
@@ -200,14 +259,6 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
     </HTMLContainer>
   );
 });
-
-function stopEventPropagationSafe(e: React.PointerEvent) {
-  try {
-    e.stopPropagation();
-  } catch {
-    /* ignore */
-  }
-}
 
 export class ResearchVideoShapeUtil extends VideoShapeUtil {
   override component(shape: TLVideoShape) {

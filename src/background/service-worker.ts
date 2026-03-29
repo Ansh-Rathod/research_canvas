@@ -9,16 +9,16 @@ import {
   type RuntimeMessage,
 } from "@shared/messages";
 import { CAPTURE_RECT_INSET_PX, insetRect } from "@shared/captureRect";
-import {
-  addArtifact,
-  createCanvas,
-  deleteArtifact,
-  deleteCanvas,
-  ensureDefaultCanvas,
-  listCanvases,
-} from "@storage/repositories";
+import { addArtifact, deleteArtifact } from "@storage/repositories";
+import { MAIN_DOCUMENT_ID } from "@shared/document";
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
+
+/**
+ * Updated synchronously when the side panel sends `SIDE_PANEL_HEARTBEAT` (no storage `await`
+ * needed to decide open vs close — `chrome.sidePanel.open()` must run in the user-gesture turn).
+ */
+let lastSidePanelHeartbeatAtMs = 0;
 
 function createRequest(
   tabId: number,
@@ -224,11 +224,9 @@ async function finalizeCaptureOutcome(
   artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">,
 ) {
   if (!tab.id) return;
-  const targetCanvasId = await resolveTargetCanvasId();
-  const saved = await addArtifact(targetCanvasId, artifact);
+  const saved = await addArtifact(artifact);
   await chrome.runtime.sendMessage({
     type: "OPEN_CANVAS",
-    canvasId: targetCanvasId,
     artifactId: saved.id,
   } as RuntimeMessage);
 }
@@ -270,6 +268,7 @@ async function runCaptureFlow(
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === SHOW_FLOATING_TOOLBAR_MENU_ID) {
     void chrome.storage.local.set({ floatingToolbarHidden: false });
+    if (tab?.id) primeSidePanelFromUserGesture(tab.id);
     return;
   }
   if (!tab?.id || !tab.url) return;
@@ -309,6 +308,7 @@ chrome.commands.onCommand.addListener((command) => {
       if (!tab?.id) {
         return;
       }
+      primeSidePanelFromUserGesture(tab.id);
       await runCaptureFlow(tab, action);
     });
 });
@@ -324,18 +324,34 @@ async function captureVisibleTab(tabId: number): Promise<string> {
 chrome.runtime.onMessage.addListener(
   (message: RuntimeMessage, sender, sendResponse) => {
     void (async () => {
+      if (message.type === "ENSURE_SIDE_PANEL_OPEN") {
+        const tabId = sender.tab?.id;
+        if (tabId) primeSidePanelFromUserGesture(tabId);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "SIDE_PANEL_HEARTBEAT") {
+        lastSidePanelHeartbeatAtMs = Date.now();
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "SIDE_PANEL_HIDDEN") {
+        lastSidePanelHeartbeatAtMs = 0;
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (message.type === "TOGGLE_CHROME_SIDE_PANEL") {
         const tabId = sender.tab?.id;
         if (!tabId) {
           sendResponse({ ok: false, error: "No tab." });
           return;
         }
-        const { sidePanelHeartbeatAt } = await chrome.storage.local.get(
-          "sidePanelHeartbeatAt",
-        );
-        const hb = Number(sidePanelHeartbeatAt ?? 0);
         const panelSeemsLive =
-          hb > 0 && Date.now() - hb < 12000;
+          lastSidePanelHeartbeatAtMs > 0 &&
+          Date.now() - lastSidePanelHeartbeatAtMs < 12000;
         if (panelSeemsLive) {
           try {
             await chrome.runtime.sendMessage({
@@ -345,17 +361,10 @@ chrome.runtime.onMessage.addListener(
             /* side panel not listening */
           }
           await chrome.storage.local.remove("sidePanelHeartbeatAt");
+          lastSidePanelHeartbeatAtMs = 0;
         } else {
-          try {
-            await chrome.sidePanel.setOptions({
-              tabId,
-              path: "src/sidepanel/index.html",
-              enabled: true,
-            });
-            await chrome.sidePanel.open({ tabId });
-          } catch (err) {
-            console.warn("Research Canvas: sidePanel.open failed", err);
-          }
+          /** Same sync-first pattern as `TRIGGER_CAPTURE` — no `await` before `open()`. */
+          primeSidePanelFromUserGesture(tabId);
         }
         sendResponse({ ok: true });
         return;
@@ -373,6 +382,7 @@ chrome.runtime.onMessage.addListener(
           sendResponse({ ok: false, error: "No tab for capture." });
           return;
         }
+        primeSidePanelFromUserGesture(tab.id);
         if (!isWebPageUrl(tab.url)) {
           sendResponse({ ok: false, error: "Not a normal web page." });
           return;
@@ -438,51 +448,25 @@ chrome.runtime.onMessage.addListener(
         return;
       }
 
-      if (message.type === "CREATE_CANVAS") {
-        const canvas = await createCanvas(
-          message.name.trim() || "Untitled Canvas",
-        );
-        sendResponse({ ok: true, canvas });
-        return;
-      }
-
       if (message.type === "DELETE_ARTIFACT") {
-        const { canvasId, artifactId } = message as {
-          type: "DELETE_ARTIFACT";
-          canvasId: string;
-          artifactId: string;
-        };
-        await deleteArtifact(canvasId, artifactId);
+        const { artifactId } = message;
+        await deleteArtifact(artifactId);
         const tomb = (
           await chrome.storage.local.get("deletedArtifactIdsByCanvas")
         ).deletedArtifactIdsByCanvas as Record<string, string[]> | undefined;
-        if (tomb?.[canvasId]?.length) {
-          const nextList = tomb[canvasId].filter((id) => id !== artifactId);
-          const all = { ...tomb, [canvasId]: nextList };
+        const key = MAIN_DOCUMENT_ID;
+        if (tomb?.[key]?.length) {
+          const nextList = tomb[key].filter((id) => id !== artifactId);
+          const all = { ...tomb, [key]: nextList };
           await chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
         }
         sendResponse({ ok: true });
         return;
       }
 
-      if (message.type === "DELETE_CANVAS") {
-        await deleteCanvas(message.canvasId);
-        const canvases = await listCanvases();
-        if (canvases.length === 0) await ensureDefaultCanvas();
-        sendResponse({ ok: true, canvases: await listCanvases() });
-        return;
-      }
-
-      if ((message as any).type === "LIST_CANVASES") {
-        const canvases = await listCanvases();
-        if (canvases.length === 0) await ensureDefaultCanvas();
-        sendResponse({ ok: true, canvases: await listCanvases() });
-        return;
-      }
-
-      if ((message as any).type === "LIST_ARTIFACTS") {
+      if (message.type === "LIST_ARTIFACTS") {
         const mod = await import("@storage/repositories");
-        const artifacts = await mod.listArtifacts((message as any).canvasId);
+        const artifacts = await mod.listArtifacts();
         const withData = await Promise.all(
           artifacts.map(async (row) => {
             if (row.dataUrl) return row;
@@ -816,24 +800,6 @@ async function captureArtifactForRequest(
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function resolveTargetCanvasId(): Promise<string> {
-  const { lastActiveCanvasId } = await chrome.storage.local.get(
-    "lastActiveCanvasId",
-  );
-  const canvases = await listCanvases();
-  if (canvases.length === 0) {
-    const created = await ensureDefaultCanvas();
-    return created.id;
-  }
-  if (
-    typeof lastActiveCanvasId === "string" &&
-    canvases.some((c) => c.id === lastActiveCanvasId)
-  ) {
-    return lastActiveCanvasId;
-  }
-  return canvases[0]!.id;
 }
 
 async function getTabStreamId(tabId: number): Promise<string> {

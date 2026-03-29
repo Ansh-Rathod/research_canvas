@@ -18,13 +18,6 @@ export type QuoteColorToken = string;
 
 export type ArtifactType = "text" | "image" | "video" | "link";
 
-export interface CanvasRecord {
-  id: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
 export interface ArtifactRecord {
   id: string;
   canvasId: string;
@@ -58,13 +51,24 @@ export interface PendingCaptureRequest {
 }
 
 export type RuntimeMessage =
+  /**
+   * Content script → SW: open the Research Canvas side panel for this tab (call from a user
+   * gesture, e.g. before starting toolbar recording) so the canvas is visible while work runs.
+   */
+  | { type: "ENSURE_SIDE_PANEL_OPEN" }
   /** Page toolbar: open/close the extension’s Chrome side panel (like the toolbar icon). */
   | { type: "TOGGLE_CHROME_SIDE_PANEL" }
+  /**
+   * Side panel → service worker: panel JS is alive (sync timestamp, no `await` before
+   * `sidePanel.open()` in toggle — storage alone would require `await` and break the gesture).
+   */
+  | { type: "SIDE_PANEL_HEARTBEAT" }
+  /** Side panel became hidden — clear SW “live” state so the toolbar toggle can open again. */
+  | { type: "SIDE_PANEL_HIDDEN" }
   /** Service worker → side panel document to dismiss the panel. */
   | { type: "CLOSE_SIDE_PANEL" }
-  | { type: "DELETE_ARTIFACT"; canvasId: string; artifactId: string }
-  | { type: "CREATE_CANVAS"; name: string }
-  | { type: "DELETE_CANVAS"; canvasId: string }
+  | { type: "DELETE_ARTIFACT"; artifactId: string }
+  | { type: "LIST_ARTIFACTS" }
   | { type: "TRIGGER_CAPTURE"; action: CaptureAction }
   /** Recording finished in the page using `getDisplayMedia` (toolbar); background adds titles/URLs. */
   | {
@@ -84,7 +88,7 @@ export type RuntimeMessage =
   | { type: "REQUEST_ELEMENT_RECORDING"; streamId: string }
   | { type: "CAPTURE_RESULT"; requestId: string; artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt"> }
   | { type: "CAPTURE_ERROR"; requestId: string; message: string }
-  | { type: "OPEN_CANVAS"; canvasId: string; artifactId?: string };
+  | { type: "OPEN_CANVAS"; artifactId?: string };
 
 export const CONTEXT_MENU_IDS: Record<CaptureAction, string> = {
   "capture-selected-text-heading":

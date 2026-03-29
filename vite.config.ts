@@ -8,6 +8,27 @@ const rootDir = fileURLToPath(new URL(".", import.meta.url));
 /** tldraw defaults IndexedDB persist throttle to 350ms; shorten for near-immediate auto-save. */
 const TLDRAW_PERSIST_THROTTLE_MS = 50;
 
+/**
+ * TldrawUiButtonPicker passes `undefined` for ToggleGroup `value` when selection is mixed,
+ * then a string when unified — React warns about switching controlled ↔ uncontrolled.
+ * Empty string matches no style token and keeps the group controlled. See tldraw TldrawUiButtonPicker.
+ */
+function tldrawToggleGroupControlledFixPlugin(): Plugin {
+  const needle =
+    'value: value.type === "shared" ? value.value : void 0';
+  const replacement =
+    'value: value.type === "shared" ? value.value : ""';
+  return {
+    name: "tldraw-toggle-group-controlled-fix",
+    transform(code, id) {
+      if (!id.includes("TldrawUiButtonPicker")) return null;
+      if (!code.includes(needle)) return null;
+      const patched = code.replace(needle, replacement);
+      return patched === code ? null : patched;
+    },
+  };
+}
+
 function tldrawFastPersistPlugin(ms: number): Plugin {
   return {
     name: "tldraw-fast-persist",
@@ -24,7 +45,11 @@ function tldrawFastPersistPlugin(ms: number): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), tldrawFastPersistPlugin(TLDRAW_PERSIST_THROTTLE_MS)],
+  plugins: [
+    react(),
+    tldrawFastPersistPlugin(TLDRAW_PERSIST_THROTTLE_MS),
+    tldrawToggleGroupControlledFixPlugin(),
+  ],
   resolve: {
     alias: {
       "@shared": resolve(rootDir, "src/shared"),

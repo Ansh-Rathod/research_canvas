@@ -1,54 +1,12 @@
-import type { ArtifactRecord, CanvasRecord } from "@shared/messages";
+import type { ArtifactRecord } from "@shared/messages";
+import { MAIN_DOCUMENT_ID } from "@shared/document";
 import { getDb } from "./db";
 
 function makeId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function ensureDefaultCanvas() {
-  const db = await getDb();
-  const all = await db.getAll("canvases");
-  if (all.length > 0) return all.sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  return createCanvas("Research Canvas");
-}
-
-export async function createCanvas(name: string): Promise<CanvasRecord> {
-  const now = Date.now();
-  const canvas: CanvasRecord = {
-    id: makeId("canvas"),
-    name,
-    createdAt: now,
-    updatedAt: now,
-  };
-  const db = await getDb();
-  await db.put("canvases", canvas);
-  return canvas;
-}
-
-export async function listCanvases(): Promise<CanvasRecord[]> {
-  const db = await getDb();
-  const canvases = await db.getAll("canvases");
-  return canvases.sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-export async function deleteCanvas(canvasId: string): Promise<void> {
-  const db = await getDb();
-  const artifacts = await db.getAllFromIndex(
-    "artifacts",
-    "by-canvasId",
-    canvasId,
-  );
-  for (const artifact of artifacts) {
-    if (artifact.blobId) {
-      await db.delete("blobs", artifact.blobId);
-    }
-    await db.delete("artifacts", artifact.id);
-  }
-  await db.delete("canvases", canvasId);
-}
-
 export async function addArtifact(
-  canvasId: string,
   input: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">,
 ): Promise<ArtifactRecord> {
   const db = await getDb();
@@ -65,42 +23,31 @@ export async function addArtifact(
     dataUrl,
     id,
     blobId,
-    canvasId,
+    canvasId: MAIN_DOCUMENT_ID,
     createdAt: Date.now(),
   };
   await db.put("artifacts", artifact);
-  const canvas = await db.get("canvases", canvasId);
-  if (canvas) {
-    canvas.updatedAt = Date.now();
-    await db.put("canvases", canvas);
-  }
   return artifact;
 }
 
-export async function deleteArtifact(
-  canvasId: string,
-  artifactId: string,
-): Promise<boolean> {
+export async function deleteArtifact(artifactId: string): Promise<boolean> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== canvasId) return false;
+  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return false;
   if (row.blobId) {
     await db.delete("blobs", row.blobId);
   }
   await db.delete("artifacts", artifactId);
-  const canvas = await db.get("canvases", canvasId);
-  if (canvas) {
-    canvas.updatedAt = Date.now();
-    await db.put("canvases", canvas);
-  }
   return true;
 }
 
-export async function listArtifacts(
-  canvasId: string,
-): Promise<ArtifactRecord[]> {
+export async function listArtifacts(): Promise<ArtifactRecord[]> {
   const db = await getDb();
-  const rows = await db.getAllFromIndex("artifacts", "by-canvasId", canvasId);
+  const rows = await db.getAllFromIndex(
+    "artifacts",
+    "by-canvasId",
+    MAIN_DOCUMENT_ID,
+  );
   return rows.sort((a, b) => a.createdAt - b.createdAt);
 }
 
