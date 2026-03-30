@@ -6,13 +6,17 @@ import type { Editor } from "@tldraw/editor";
 import {
   Box,
   DefaultImageToolbarContent,
+  DefaultMainMenu,
+  DefaultMainMenuContent,
   DefaultVideoToolbarContent,
-  renderPlaintextFromRichText,
   Tldraw,
-  TldrawUiButton,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
+  TldrawUiMenuGroup,
+  TldrawUiMenuItem,
   TldrawUiToolbarButton,
+  getSnapshot,
+  renderPlaintextFromRichText,
   toRichText,
   useEditor,
   useValue,
@@ -128,6 +132,114 @@ function toShapeId(id: string) {
 
 function toAssetId(id: string) {
   return `asset:${id}` as any;
+}
+
+function triggerCanvasExport(artifacts: ArtifactRecord[], editor: Editor | null) {
+  const exportName = `research-canvas-export-${new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")}`;
+  const snapshot =
+    editor && (getSnapshot as any)
+      ? (getSnapshot as any)(editor.store)
+      : undefined;
+  return chrome.runtime.sendMessage({
+    type: "EXPORT_CANVAS_REQUEST",
+    snapshot,
+    artifacts,
+    exportName,
+  } as RuntimeMessage) as Promise<{ ok?: boolean; error?: string } | undefined>;
+}
+
+function ExportCanvasButton({
+  exporting,
+  onExport,
+}: {
+  exporting: boolean;
+  onExport: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 12,
+        right: 16,
+        zIndex: 20,
+        pointerEvents: "auto",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onExport}
+        disabled={exporting}
+        style={{
+          padding: "6px 10px",
+          borderRadius: 999,
+          border: "1px solid rgba(148, 163, 184, 0.8)",
+          background:
+            "linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,64,175,0.96))",
+          color: "white",
+          fontSize: 11,
+          fontFamily:
+            "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+          boxShadow: "0 8px 22px rgba(15,23,42,0.55)",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <span
+          style={{
+            width: 14,
+            height: 14,
+            borderRadius: 999,
+            border: "1px solid rgba(148,163,184,0.9)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 9,
+            background: "rgba(15,23,42,0.9)",
+          }}
+        >
+          ⇩
+        </span>
+        <span>{exporting ? "Exporting…" : "Export canvas"}</span>
+      </button>
+    </div>
+  );
+}
+
+function CustomMainMenu(
+  props: { artifacts: ArtifactRecord[]; editor: Editor | null } & Record<string, unknown>,
+) {
+  const { artifacts, editor, ...rest } = props;
+  const handleExport = useCallback(async () => {
+    try {
+      const response = await triggerCanvasExport(artifacts, editor);
+      if (!response?.ok && response?.error) {
+        // eslint-disable-next-line no-console
+        console.error("Export canvas failed:", response.error);
+      }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Export canvas failed:", error);
+    }
+  }, [artifacts]);
+
+  return (
+    <DefaultMainMenu {...(rest as any)}>
+      <TldrawUiMenuGroup id="research-canvas-export">
+        <TldrawUiMenuItem
+          id="research-canvas-export-item"
+          label="Export current page"
+          icon="export"
+          readonlyOk
+          onSelect={handleExport}
+        />
+      </TldrawUiMenuGroup>
+      <DefaultMainMenuContent />
+    </DefaultMainMenu>
+  );
 }
 
 function CanvasScene({
@@ -955,6 +1067,8 @@ function VideoToolbarWithUrl() {
 export function ResearchCanvasApp() {
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [sessionReady, setSessionReady] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const loadArtifactsSeq = useRef(0);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
 
@@ -1037,7 +1151,10 @@ export function ResearchCanvasApp() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
+  const editorRef = useRef<Editor | null>(null);
+
   const onTldrawMount = useCallback((editor: Editor) => {
+    editorRef.current = editor;
     migrateLegacyYoutubeEmbedUrls(editor);
     const gridSeededKey = `research-canvas-grid-seeded-v1-${MAIN_DOCUMENT_ID}`;
     try {
@@ -1052,9 +1169,50 @@ export function ResearchCanvasApp() {
 
   const muted = "#555555";
 
+  const handleExport = useCallback(async () => {
+    if (exporting) return;
+    setExportError(null);
+    setExporting(true);
+    try {
+      const response = await triggerCanvasExport(artifacts, editorRef.current);
+      if (!response?.ok && response?.error) {
+        setExportError(response.error);
+      }
+    } catch (error) {
+      setExportError(
+        error instanceof Error ? error.message : "Export failed unexpectedly.",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [artifacts, exporting]);
+
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw" }}>
-      <main style={{ flex: 1, minHeight: 0 }}>
+      <main style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        {sessionReady ? (
+          <>
+            <ExportCanvasButton exporting={exporting} onExport={handleExport} />
+            {exportError ? (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 40,
+                  right: 16,
+                  zIndex: 20,
+                  maxWidth: 260,
+                  fontSize: 11,
+                  color: "#f97373",
+                  fontFamily:
+                    "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+                  textAlign: "right",
+                }}
+              >
+                Export failed: {exportError}
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {!sessionReady ? (
           <div
             style={{
@@ -1075,6 +1233,13 @@ export function ResearchCanvasApp() {
             shapeUtils={RESEARCH_SHAPE_UTILS}
             onMount={onTldrawMount}
             components={{
+              MainMenu: (props: any) => (
+                <CustomMainMenu
+                  {...props}
+                  artifacts={artifacts}
+                  editor={editorRef.current}
+                />
+              ),
               ImageToolbar: ImageToolbarWithUrl,
               VideoToolbar: VideoToolbarWithUrl,
             }}

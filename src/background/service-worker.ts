@@ -11,6 +11,7 @@ import {
 import { CAPTURE_RECT_INSET_PX, insetRect } from "@shared/captureRect";
 import { addArtifact, deleteArtifact, readBlobAsDataUrl } from "@storage/repositories";
 import { MAIN_DOCUMENT_ID } from "@shared/document";
+import JSZip from "jszip";
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
 
@@ -450,6 +451,267 @@ chrome.runtime.onMessage.addListener(
         return;
       }
 
+      if (message.type === "EXPORT_CANVAS_REQUEST") {
+        try {
+          const artifacts = message.artifacts ?? [];
+          const snapshot = message.snapshot ?? {};
+          const exportName =
+            message.exportName && message.exportName.trim().length
+              ? message.exportName.trim()
+              : "research-canvas-export";
+
+          // Core app templates for a minimal React + Vite project.
+          const packageJson = JSON.stringify(
+            {
+              name: exportName,
+              private: true,
+              version: "0.0.0",
+              scripts: {
+                dev: "vite",
+                build: "vite build",
+                preview: "vite preview",
+              },
+              dependencies: {
+                react: "latest",
+                "react-dom": "latest",
+                "@tldraw/tldraw": "latest",
+              },
+              devDependencies: {
+                typescript: "latest",
+                vite: "latest",
+              },
+            },
+            null,
+            2,
+          );
+
+          const indexHtml = [
+            "<!doctype html>",
+            '<html lang="en">',
+            "<head>",
+            '  <meta charset=\"utf-8\" />',
+            `  <title>${exportName}</title>`,
+            '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+            "</head>",
+            "<body>",
+            '  <div id="root"></div>',
+            '  <script type="module" src="/src/main.tsx"></script>',
+            "</body>",
+            "</html>",
+          ].join("\n");
+
+          const mainTsx = [
+            'import React from "react";',
+            'import ReactDOM from "react-dom/client";',
+            'import { ResearchCanvasExportApp } from "./ResearchCanvasExportApp";',
+            '',
+            'import "@tldraw/tldraw/tldraw.css";',
+            'import "./export.css";',
+            '',
+            'ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(',
+            "  <React.StrictMode>",
+            "    <ResearchCanvasExportApp />",
+            "  </React.StrictMode>,",
+            ");",
+            "",
+          ].join("\n");
+
+          const exportCss = [
+            "html, body, #root {",
+            "  margin: 0;",
+            "  padding: 0;",
+            "  height: 100%;",
+            "}",
+            "body {",
+            "  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;",
+            "  background: radial-gradient(circle at top left, #0b1120 0, #020617 52%, #020617 100%);",
+            "}",
+            ".rc-root {",
+            "  width: 100%;",
+            "  height: 100%;",
+            "  display: flex;",
+            "  align-items: stretch;",
+            "  justify-content: stretch;",
+            "}",
+            ".rc-root .tl-container {",
+            "  border-radius: 24px;",
+            "  border: 1px solid rgba(30,64,175,0.5);",
+            "  box-shadow:",
+            "    0 24px 80px rgba(15,23,42,0.9),",
+            "    0 0 0 1px rgba(15,23,42,0.8) inset;",
+            "  overflow: hidden;",
+            "}",
+          ].join("\n");
+
+          const artifactsJson = JSON.stringify(artifacts, null, 2);
+          const snapshotJson = JSON.stringify(snapshot, null, 2);
+
+          const appTsx = [
+            "// @ts-nocheck",
+            'import React from "react";',
+            'import { Tldraw } from "@tldraw/tldraw";',
+            'import rawSnapshot from "./snapshot.json";',
+            'import artifacts from "./artifacts.json";',
+            "",
+            "const snapshot =",
+            "  rawSnapshot && typeof rawSnapshot === \"object\" && (rawSnapshot as any).schema",
+            "    ? (rawSnapshot as any)",
+            "    : undefined;",
+            "",
+            "function toShapeId(id) {",
+            "  return `shape:${id}`;",
+            "}",
+            "",
+            "function toAssetId(id) {",
+            "  return `asset:${id}`;",
+            "}",
+            "",
+            "function resolvePlacement(artifact, index) {",
+            "  const GRID_STEP_X = 320;",
+            "  const GRID_STEP_Y = 220;",
+            "  let x =",
+            "    typeof artifact.canvasX === \"number\"",
+            "      ? artifact.canvasX",
+            "      : 80 + (index % 3) * GRID_STEP_X;",
+            "  let y =",
+            "    typeof artifact.canvasY === \"number\"",
+            "      ? artifact.canvasY",
+            "      : 80 + Math.floor(index / 3) * GRID_STEP_Y;",
+            "  if (!Number.isFinite(x)) x = 80 + (index % 3) * GRID_STEP_X;",
+            "  if (!Number.isFinite(y)) y = 80 + Math.floor(index / 3) * GRID_STEP_Y;",
+            "  return { x, y };",
+            "}",
+            "",
+            "export function ResearchCanvasExportApp() {",
+            "  if (snapshot) {",
+            "    return (",
+            '      <div className="rc-root">',
+            "        <Tldraw snapshot={snapshot as any} />",
+            "      </div>",
+            "    );",
+            "  }",
+            "",
+            "  return (",
+            '    <div className="rc-root">',
+            "      <Tldraw",
+            '        persistenceKey={null as any}',
+            "        onMount={(editor) => {",
+            "          if (!editor || !Array.isArray(artifacts)) return;",
+            "          artifacts.forEach((artifact, index) => {",
+            "            if (!artifact || !artifact.id || !artifact.type) return;",
+            "            const { x, y } = resolvePlacement(artifact, index);",
+            "            const shapeId = toShapeId(artifact.id);",
+            "            if (editor.getShape(shapeId)) return;",
+            "",
+            "            if (artifact.type === \"image\" && artifact.dataUrl) {",
+            "              const assetId = toAssetId(`${artifact.id}_asset`);",
+            "              const w = artifact.width || 420;",
+            "              const h = artifact.height || 260;",
+            "              editor.createAssets([",
+            "                {",
+            "                  id: assetId,",
+            "                  type: \"image\",",
+            "                  typeName: \"asset\",",
+            "                  props: {",
+            "                    src: artifact.dataUrl,",
+            "                    w,",
+            "                    h,",
+            "                    name: artifact.title,",
+            "                    isAnimated: false,",
+            "                    mimeType: \"image/png\",",
+            "                  },",
+            "                  meta: {},",
+            "                },",
+            "              ]);",
+            "              editor.createShape({",
+            "                id: shapeId,",
+            "                type: \"image\",",
+            "                x,",
+            "                y,",
+            "                props: {",
+            "                  assetId,",
+            "                  w,",
+            "                  h,",
+            "                },",
+            "              });",
+            "              return;",
+            "            }",
+            "",
+            "            if (artifact.type === \"video\") {",
+            "              const src = artifact.dataUrl || artifact.sourceUrl;",
+            "              if (!src) return;",
+            "              const assetId = toAssetId(`${artifact.id}_video_asset`);",
+            "              const w = artifact.width || 420;",
+            "              const h = artifact.height || 260;",
+            "              editor.createAssets([",
+            "                {",
+            "                  id: assetId,",
+            "                  type: \"video\",",
+            "                  typeName: \"asset\",",
+            "                  props: {",
+            "                    src,",
+            "                    w,",
+            "                    h,",
+            "                    name: artifact.title,",
+            "                    isAnimated: true,",
+            "                    mimeType: \"video/webm\",",
+            "                  },",
+            "                  meta: {},",
+            "                },",
+            "              ]);",
+            "              const isHttpUrl =",
+            '                typeof src === "string" && (src.startsWith("http://") || src.startsWith("https://"));',
+            "              editor.createShape({",
+            "                id: shapeId,",
+            "                type: \"video\",",
+            "                x,",
+            "                y,",
+            "                props: {",
+            "                  w,",
+            "                  h,",
+            "                  assetId,",
+            "                  playing: false,",
+            "                  ...(isHttpUrl ? { url: src } : {}),",
+            "                },",
+            "              });",
+            "              return;",
+            "            }",
+            "          });",
+            "        }}",
+            "      />",
+            "    </div>",
+            "  );",
+            "}",
+            "",
+          ].join("\n");
+
+          const zip = new JSZip();
+          zip.file("package.json", packageJson);
+          zip.file("index.html", indexHtml);
+          zip.file("src/main.tsx", mainTsx);
+          zip.file("src/ResearchCanvasExportApp.tsx", appTsx);
+          zip.file("src/export.css", exportCss);
+          zip.file("src/artifacts.json", artifactsJson);
+          zip.file("src/snapshot.json", snapshotJson);
+
+          const base64 = await zip.generateAsync({ type: "base64" });
+          const url = `data:application/zip;base64,${base64}`;
+          const filename = `${exportName}.zip`;
+          await chrome.downloads.download({
+            url,
+            filename,
+            saveAs: true,
+          });
+          sendResponse({ ok: true });
+        } catch (error) {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+
       if (message.type === "DELETE_ARTIFACT") {
         const { artifactId } = message;
         await deleteArtifact(artifactId);
@@ -810,6 +1072,287 @@ async function captureArtifactForRequest(
     width: response.width,
     height: response.height,
   };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildExportHtml(artifacts: ArtifactRecord[], exportName?: string): string {
+  const title =
+    exportName && exportName.trim().length
+      ? exportName
+      : "Research Canvas export";
+
+  // Derive canvas-style positions from saved canvas coordinates when available.
+  type Placed = ArtifactRecord & { _x: number; _y: number };
+  const placed: Placed[] = [];
+  const GRID_STEP_X = 320;
+  const GRID_STEP_Y = 220;
+
+  artifacts.forEach((artifact, index) => {
+    let x =
+      typeof artifact.canvasX === "number"
+        ? artifact.canvasX
+        : 80 + (index % 3) * GRID_STEP_X;
+    let y =
+      typeof artifact.canvasY === "number"
+        ? artifact.canvasY
+        : 80 + Math.floor(index / 3) * GRID_STEP_Y;
+    if (!Number.isFinite(x)) x = 80 + (index % 3) * GRID_STEP_X;
+    if (!Number.isFinite(y)) y = 80 + Math.floor(index / 3) * GRID_STEP_Y;
+    placed.push({ ...(artifact as ArtifactRecord), _x: x, _y: y });
+  });
+
+  const pad = 64;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  placed.forEach((p) => {
+    minX = Math.min(minX, p._x);
+    minY = Math.min(minY, p._y);
+    maxX = Math.max(maxX, p._x + (p.width ?? 420));
+    maxY = Math.max(maxY, p._y + (p.height ?? 260));
+  });
+  if (!Number.isFinite(minX)) {
+    minX = 0;
+    minY = 0;
+    maxX = 960;
+    maxY = 640;
+  }
+  const canvasWidth = Math.max(960, maxX - minX + pad * 2);
+  const canvasHeight = Math.max(640, maxY - minY + pad * 2);
+
+  const cards = placed
+    .map((artifact) => {
+      const left = artifact._x - minX + pad;
+      const top = artifact._y - minY + pad;
+      const safeTitle = escapeHtml(artifact.title || "(untitled)");
+      const safeSource = escapeHtml(artifact.sourceUrl || "");
+      const metaParts: string[] = [];
+      if (artifact.capturedFromUrl && artifact.capturedFromUrl !== artifact.sourceUrl) {
+        metaParts.push(
+          `Captured while on <a href="${escapeHtml(
+            artifact.capturedFromUrl,
+          )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+            artifact.capturedFromUrl,
+          )}</a>`,
+        );
+      }
+      if (artifact.profileUrl) {
+        metaParts.push(
+          `Profile: <a href="${escapeHtml(
+            artifact.profileUrl,
+          )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+            artifact.profileUrl,
+          )}</a>`,
+        );
+      }
+      const metaHtml = metaParts.length
+        ? `<div class="rc-card-meta">${metaParts.join(" · ")}</div>`
+        : "";
+
+      let contentHtml = "";
+      if (artifact.type === "text") {
+        const text = escapeHtml(artifact.text ?? "");
+        contentHtml = `<div class="rc-card-text">${text}</div>`;
+      } else if (artifact.type === "image" && artifact.dataUrl) {
+        const width = artifact.width ? ` width="${artifact.width}"` : "";
+        const height = artifact.height ? ` height="${artifact.height}"` : "";
+        contentHtml = `<div class="rc-card-media"><img src="${artifact.dataUrl}" alt="${safeTitle}" loading="lazy"${width}${height} /></div>`;
+      } else if (artifact.type === "video" && artifact.dataUrl) {
+        const width = artifact.width ? ` width="${artifact.width}"` : ` width="420"`;
+        const height = artifact.height ? ` height="${artifact.height}"` : ` height="260"`;
+        contentHtml = `<div class="rc-card-media"><video src="${artifact.dataUrl}" controls${width}${height}></video></div>`;
+      } else if (artifact.type === "link") {
+        const description = artifact.description
+          ? `<div class="rc-card-text">${escapeHtml(artifact.description)}</div>`
+          : "";
+        const thumb = artifact.dataUrl
+          ? `<div class="rc-card-media rc-card-media--small"><img src="${artifact.dataUrl}" alt="${safeTitle}" loading="lazy" /></div>`
+          : "";
+        contentHtml = `${thumb}${description}`;
+      }
+
+      const created = new Date(artifact.createdAt || Date.now()).toLocaleString();
+
+      return `<article class="rc-card rc-card--${escapeHtml(
+        artifact.type,
+      )}" style="left:${left}px;top:${top}px;"><header class="rc-card-header"><div class="rc-card-title">${safeTitle}</div><div class="rc-card-subtitle"><a href="${safeSource}" target="_blank" rel="noopener noreferrer">${safeSource}</a></div><div class="rc-card-timestamp">${escapeHtml(
+        created,
+      )}</div></header>${contentHtml}${metaHtml}</article>`;
+    })
+    .join("\n");
+
+  return [
+    "<!doctype html>",
+    `<html lang="en">`,
+    "<head>",
+    '<meta charset="utf-8" />',
+    `<title>${title}</title>`,
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    "<style>",
+    `:root {
+  color-scheme: dark;
+  --rc-bg: #020617;
+  --rc-surface: #020617;
+  --rc-surface-elevated: #020617;
+  --rc-border-subtle: rgba(148, 163, 184, 0.45);
+  --rc-text: #e5e7eb;
+  --rc-text-muted: #9ca3af;
+  --rc-accent: #4f46e5;
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: radial-gradient(circle at top left, #0b1120 0, #020617 52%, #020617 100%);
+  color: var(--rc-text);
+}
+.rc-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.rc-header {
+  padding: 16px 20px 8px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.9);
+  background: linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,64,175,0.9));
+  box-shadow: 0 10px 40px rgba(0,0,0,0.45);
+}
+.rc-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.rc-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--rc-text-muted);
+}
+.rc-main {
+  flex: 1;
+  padding: 16px 20px 24px;
+  overflow: auto;
+}
+.rc-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  width: ${canvasWidth}px;
+  height: ${canvasHeight}px;
+  border-radius: 24px;
+  border: 1px solid rgba(30,64,175,0.5);
+  background:
+    radial-gradient(circle at top left, rgba(15,23,42,0.7), transparent 55%),
+    radial-gradient(circle at bottom right, rgba(15,23,42,0.9), transparent 55%),
+    #020617;
+  box-shadow:
+    0 24px 80px rgba(15,23,42,0.9),
+    0 0 0 1px rgba(15,23,42,0.8) inset;
+  overflow: visible;
+}
+.rc-card {
+  position: absolute;
+  padding: 12px 12px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--rc-border-subtle);
+  background:
+    radial-gradient(circle at top left, rgba(148,163,184,0.16), transparent 55%),
+    linear-gradient(145deg, rgba(15,23,42,0.98), rgba(15,23,42,0.96));
+  box-shadow:
+    0 14px 45px rgba(15,23,42,0.9),
+    0 0 0 1px rgba(15,23,42,0.7) inset;
+}
+.rc-card-header {
+  margin-bottom: 8px;
+}
+.rc-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.rc-card-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--rc-text-muted);
+  word-break: break-all;
+}
+.rc-card-timestamp {
+  margin-top: 2px;
+  font-size: 10px;
+  color: rgba(148,163,184,0.9);
+}
+.rc-card-media {
+  margin-top: 8px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(30,64,175,0.7);
+  background: #020617;
+}
+.rc-card-media img,
+.rc-card-media video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.rc-card-media--small img {
+  max-height: 140px;
+  object-fit: cover;
+}
+.rc-card-text {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.rc-card-meta {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--rc-text-muted);
+}
+a {
+  color: var(--rc-accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+@media (max-width: 640px) {
+  .rc-header {
+    padding-inline: 14px;
+  }
+  .rc-main {
+    padding-inline: 14px;
+  }
+}`,
+    "</style>",
+    "</head>",
+    "<body>",
+    '<div class="rc-shell">',
+    '<header class="rc-header">',
+    `<div class="rc-title">${title}</div>`,
+    '<div class="rc-subtitle">Static snapshot of your Research Canvas — media is fully local in this file and no longer connected to the extension.</div>',
+    "</header>",
+    '<main class="rc-main">',
+    `<div class="rc-canvas">${
+      cards ||
+      '<p style="position:absolute;left:32px;top:32px;font-size:13px;color:#9ca3af;">No artifacts were found for this export.</p>'
+    }</div>`,
+    "</main>",
+    "</div>",
+    "</body>",
+    "</html>",
+  ].join("\n");
 }
 
 function delay(ms: number) {

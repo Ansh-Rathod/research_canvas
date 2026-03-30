@@ -108,7 +108,14 @@ export type RuntimeMessage =
   | { type: "REQUEST_ELEMENT_RECORDING"; streamId: string }
   | { type: "CAPTURE_RESULT"; requestId: string; artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt"> }
   | { type: "CAPTURE_ERROR"; requestId: string; message: string }
-  | { type: "OPEN_CANVAS"; artifactId?: string };
+  | { type: "OPEN_CANVAS"; artifactId?: string }
+  | {
+      type: "EXPORT_CANVAS_REQUEST";
+      /** Snapshot of the current canvas document or other export metadata (currently unused by the exporter but reserved for future use). */
+      snapshot?: unknown;
+      artifacts: ArtifactRecord[];
+      exportName?: string;
+    };
 
 export const CONTEXT_MENU_IDS: Record<CaptureAction, string> = {
   "capture-selected-text-heading":

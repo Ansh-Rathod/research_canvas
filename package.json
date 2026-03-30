@@ -11,6 +11,7 @@
   "dependencies": {
     "@tldraw/tldraw": "^3.14.4",
     "idb": "^8.0.3",
+    "jszip": "^3.10.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
