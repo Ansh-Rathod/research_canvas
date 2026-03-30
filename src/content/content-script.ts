@@ -255,15 +255,25 @@ async function runTabRecordingPipeline(
   const [croppedVideoTrack] = croppedStream.getVideoTracks();
   if (croppedVideoTrack) finalStream.addTrack(croppedVideoTrack);
   stream.getAudioTracks().forEach((audioTrack) => finalStream.addTrack(audioTrack));
-  const recorder = new MediaRecorder(finalStream, {
-    mimeType: "video/webm;codecs=vp8,opus",
-  });
+
+  const RECORDING_MIME = "video/webm;codecs=vp8,opus";
   const chunks: Blob[] = [];
-  recorder.ondataavailable = (ev) => {
-    if (ev.data.size > 0) chunks.push(ev.data);
+  const createRecorder = () => {
+    const r = new MediaRecorder(finalStream, { mimeType: RECORDING_MIME });
+    r.ondataavailable = (ev) => {
+      if (ev.data.size > 0) chunks.push(ev.data);
+    };
+    return r;
   };
 
-  const result = await showToolbarRecordingControls(recorder, removeOutline);
+  const result = await showToolbarRecordingControls({
+    createRecorder,
+    clearChunks: () => {
+      chunks.length = 0;
+    },
+    removeOutline,
+  });
+
   window.clearInterval(drawInterval);
   track.stop();
   stream.getAudioTracks().forEach((audioTrack) => audioTrack.stop());
@@ -275,12 +285,16 @@ async function runTabRecordingPipeline(
   if (result === "cancelled") {
     throw new Error("Recording cancelled.");
   }
+  if (result === "retake") {
+    return { status: "retake" as const };
+  }
 
   const blob = new Blob(chunks, { type: "video/webm" });
   if (blob.size === 0) {
     throw new Error("No video captured.");
   }
   return {
+    status: "success" as const,
     dataUrl: await blobToDataUrl(blob),
     width: cropRect.width,
     height: cropRect.height,
@@ -293,16 +307,17 @@ async function recordCroppedTabSnippet(
   streamId: string,
   pickRect: () => Promise<RectPickResult>,
 ) {
-  const { rect, linkUrl, profileUrl } = await pickRect();
-  const paddedRect = insetRectForCapture(rect, CAPTURE_RECT_INSET_PX) ?? rect;
-  let cropRect = snapRectForRecording(paddedRect);
-  const bleedGuard = shrinkRectSymmetricForCapture(
-    cropRect,
-    CAPTURE_RECORDING_BLEED_GUARD_PX,
-  );
-  if (bleedGuard) cropRect = bleedGuard;
-  const removeOutline = showRecordingRegionOutline(cropRect);
-  try {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { rect, linkUrl, profileUrl } = await pickRect();
+    const paddedRect = insetRectForCapture(rect, CAPTURE_RECT_INSET_PX) ?? rect;
+    let cropRect = snapRectForRecording(paddedRect);
+    const bleedGuard = shrinkRectSymmetricForCapture(
+      cropRect,
+      CAPTURE_RECORDING_BLEED_GUARD_PX,
+    );
+    if (bleedGuard) cropRect = bleedGuard;
+    const removeOutline = showRecordingRegionOutline(cropRect);
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         mandatory: {
@@ -319,18 +334,34 @@ async function recordCroppedTabSnippet(
       },
     } as MediaStreamConstraints);
     try {
-      return await runTabRecordingPipeline(
+      const pipelineResult = await runTabRecordingPipeline(
         stream,
         cropRect,
         linkUrl,
         profileUrl,
         removeOutline,
       );
-    } finally {
+      if (pipelineResult.status === "retake") {
+        stream.getTracks().forEach((t) => t.stop());
+        removeOutline();
+        continue;
+      }
       stream.getTracks().forEach((t) => t.stop());
+      removeOutline();
+      return {
+        dataUrl: pipelineResult.dataUrl,
+        width: pipelineResult.width,
+        height: pipelineResult.height,
+        ...(pipelineResult.linkUrl ? { linkUrl: pipelineResult.linkUrl } : {}),
+        ...(pipelineResult.profileUrl
+          ? { profileUrl: pipelineResult.profileUrl }
+          : {}),
+      };
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      removeOutline();
+      throw e;
     }
-  } finally {
-    removeOutline();
   }
 }
 
@@ -340,28 +371,57 @@ async function recordCroppedTabSnippet(
  * same turn as the toolbar click, then run the same crop/record pipeline.
  */
 async function recordCroppedTabSnippetWithDisplayMedia(
-  stream: MediaStream,
+  initialStream: MediaStream,
   pickRect: () => Promise<RectPickResult>,
 ) {
-  const { rect, linkUrl, profileUrl } = await pickRect();
-  const paddedRect = insetRectForCapture(rect, CAPTURE_RECT_INSET_PX) ?? rect;
-  let cropRect = snapRectForRecording(paddedRect);
-  const bleedGuard = shrinkRectSymmetricForCapture(
-    cropRect,
-    CAPTURE_RECORDING_BLEED_GUARD_PX,
-  );
-  if (bleedGuard) cropRect = bleedGuard;
-  const removeOutline = showRecordingRegionOutline(cropRect);
+  let stream = initialStream;
   try {
-    return await runTabRecordingPipeline(
-      stream,
-      cropRect,
-      linkUrl,
-      profileUrl,
-      removeOutline,
-    );
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { rect, linkUrl, profileUrl } = await pickRect();
+      const paddedRect = insetRectForCapture(rect, CAPTURE_RECT_INSET_PX) ?? rect;
+      let cropRect = snapRectForRecording(paddedRect);
+      const bleedGuard = shrinkRectSymmetricForCapture(
+        cropRect,
+        CAPTURE_RECORDING_BLEED_GUARD_PX,
+      );
+      if (bleedGuard) cropRect = bleedGuard;
+      const removeOutline = showRecordingRegionOutline(cropRect);
+      try {
+        const pipelineResult = await runTabRecordingPipeline(
+          stream,
+          cropRect,
+          linkUrl,
+          profileUrl,
+          removeOutline,
+        );
+        if (pipelineResult.status === "retake") {
+          stream.getTracks().forEach((t) => t.stop());
+          removeOutline();
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true,
+            preferCurrentTab: true,
+          } as DisplayMediaStreamOptions & { preferCurrentTab?: boolean });
+          continue;
+        }
+        removeOutline();
+        return {
+          dataUrl: pipelineResult.dataUrl,
+          width: pipelineResult.width,
+          height: pipelineResult.height,
+          ...(pipelineResult.linkUrl ? { linkUrl: pipelineResult.linkUrl } : {}),
+          ...(pipelineResult.profileUrl
+            ? { profileUrl: pipelineResult.profileUrl }
+            : {}),
+        };
+      } catch (e) {
+        stream.getTracks().forEach((t) => t.stop());
+        removeOutline();
+        throw e;
+      }
+    }
   } finally {
-    removeOutline();
     stream.getTracks().forEach((t) => t.stop());
   }
 }

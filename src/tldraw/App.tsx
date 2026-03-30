@@ -1,8 +1,6 @@
-import {
-  type ArtifactRecord,
-  type RuntimeMessage,
-} from "@shared/messages";
 import { MAIN_DOCUMENT_ID } from "@shared/document";
+import { type ArtifactRecord, type RuntimeMessage } from "@shared/messages";
+import { listArtifacts, readBlobAsDataUrl } from "@storage/repositories";
 import { mergeDeletedArtifactTombstones } from "@storage/tombstones";
 import type { Editor } from "@tldraw/editor";
 import {
@@ -11,6 +9,7 @@ import {
   DefaultVideoToolbarContent,
   renderPlaintextFromRichText,
   Tldraw,
+  TldrawUiButton,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
   TldrawUiToolbarButton,
@@ -46,8 +45,9 @@ const ARTIFACT_GRID_STEP_Y = 220;
 const ARTIFACT_VIEWPORT_PAD = 48;
 
 /**
- * Place new artifacts in the **visible** page rect: grid from the top-left of the viewport
- * so captures appear where you’re looking instead of toward the canvas origin or “below” center.
+ * Place new artifacts in the **visible** viewport: a small grid anchored at the **center** of
+ * what’s on screen (page space). Top-left anchoring felt wrong when zoomed out (huge page rect)
+ * and pushed items to the edges; center anchoring stays stable at any zoom.
  */
 function artifactPositionInViewport(editor: Editor, index: number) {
   const vp = editor.getViewportPageBounds();
@@ -59,14 +59,67 @@ function artifactPositionInViewport(editor: Editor, index: number) {
   }
   const col = index % 3;
   const row = Math.floor(index / 3);
-  let x = vp.x + ARTIFACT_VIEWPORT_PAD + col * ARTIFACT_GRID_STEP_X;
-  let y = vp.y + ARTIFACT_VIEWPORT_PAD + row * ARTIFACT_GRID_STEP_Y;
-  // Keep staggered rows on-screen when many artifacts (stay inside bottom edge with slack).
-  const maxY = vp.maxY - ARTIFACT_VIEWPORT_PAD - 80;
-  if (y > maxY) {
-    y = Math.max(vp.y + ARTIFACT_VIEWPORT_PAD, maxY);
-  }
+  const cx = vp.midX;
+  const cy = vp.midY;
+  // Three columns centered on the viewport; middle column near `cx`.
+  let x = cx - ARTIFACT_GRID_STEP_X + col * ARTIFACT_GRID_STEP_X;
+  // First row sits slightly above geometric center so the card reads as “in the middle”.
+  const firstRowY = cy - 90 + row * ARTIFACT_GRID_STEP_Y;
+  let y = firstRowY;
+  const minX = vp.x + ARTIFACT_VIEWPORT_PAD;
+  const maxX = vp.maxX - ARTIFACT_VIEWPORT_PAD - 200;
+  const minY = vp.y + ARTIFACT_VIEWPORT_PAD;
+  const maxY = vp.maxY - ARTIFACT_VIEWPORT_PAD - 120;
+  x = Math.max(minX, Math.min(x, maxX));
+  y = Math.max(minY, Math.min(y, maxY));
   return { x, y };
+}
+
+function artifactGridFallbackPosition(index: number) {
+  return {
+    x: 80 + (index % 3) * ARTIFACT_GRID_STEP_X,
+    y: 80 + Math.floor(index / 3) * ARTIFACT_GRID_STEP_Y,
+  };
+}
+
+/**
+ * When false, avoid viewport-based placement (hidden tab / zero-size panel) so we do not snap to
+ * arbitrary fallback coords that change when the user returns.
+ *
+ * Note: tldraw also syncs the document across surfaces that share `persistenceKey` via
+ * BroadcastChannel (`tldraw-tab-sync-…`). Two live canvases (e.g. two windows) merge edits; that
+ * can look like “jumping” when switching focus.
+ */
+function isPlacementEnvironmentViable(editor: Editor): boolean {
+  if (
+    typeof document !== "undefined" &&
+    document.visibilityState === "hidden"
+  ) {
+    return false;
+  }
+  const vp = editor.getViewportPageBounds();
+  return vp.width >= 1 && vp.height >= 1;
+}
+
+function resolveArtifactPlacement(
+  editor: Editor,
+  artifact: ArtifactRecord,
+  index: number,
+): { x: number; y: number } {
+  const cx = artifact.canvasX;
+  const cy = artifact.canvasY;
+  if (
+    typeof cx === "number" &&
+    typeof cy === "number" &&
+    Number.isFinite(cx) &&
+    Number.isFinite(cy)
+  ) {
+    return { x: cx, y: cy };
+  }
+  if (isPlacementEnvironmentViable(editor)) {
+    return artifactPositionInViewport(editor, index);
+  }
+  return artifactGridFallbackPosition(index);
 }
 
 function toShapeId(id: string) {
@@ -107,6 +160,22 @@ function CanvasScene({
     () => Array.from(editor.getCurrentPageShapeIds()).join("|"),
     [editor],
   );
+
+  /** Re-run artifact→shape sync when the side panel becomes visible or resizes so deferred creates use a valid viewport. */
+  const [placementEpoch, setPlacementEpoch] = useState(0);
+  useEffect(() => {
+    const bump = () => {
+      if (document.visibilityState === "visible") {
+        requestAnimationFrame(() => setPlacementEpoch((n) => n + 1));
+      }
+    };
+    document.addEventListener("visibilitychange", bump);
+    window.addEventListener("resize", bump);
+    return () => {
+      document.removeEventListener("visibilitychange", bump);
+      window.removeEventListener("resize", bump);
+    };
+  }, []);
 
   useEffect(() => {
     setDeletedArtifactIds(null);
@@ -207,9 +276,23 @@ function CanvasScene({
     if (!editor || deletedArtifactIds === null) return;
     const deletedSet = buildMergedDeletedSet(deletedArtifactIds);
 
+    const persistNewPlacement = (artifactId: string, x: number, y: number) => {
+      if (import.meta.env.DEV) {
+        console.debug("[ResearchCanvas] createShape", { artifactId, x, y });
+      }
+      void chrome.runtime
+        .sendMessage({
+          type: "SET_ARTIFACT_CANVAS_POSITION",
+          artifactId,
+          canvasX: x,
+          canvasY: y,
+        } as RuntimeMessage)
+        .then(() => onArtifactsChangedRef.current?.());
+    };
+
     artifacts.forEach((artifact, index) => {
       if (deletedSet.has(artifact.id)) return;
-      const position = artifactPositionInViewport(editor, index);
+      const position = resolveArtifactPlacement(editor, artifact, index);
       if (artifact.type === "text") {
         /** Legacy text artifacts omit this; match previous plain-text appearance via body styling. */
         const presentation = artifact.textPresentation ?? "body";
@@ -240,6 +323,7 @@ function CanvasScene({
             },
             meta,
           });
+          persistNewPlacement(artifact.id, position.x, position.y);
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
@@ -266,6 +350,7 @@ function CanvasScene({
             },
             meta,
           });
+          persistNewPlacement(artifact.id, position.x, position.y);
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
@@ -295,6 +380,7 @@ function CanvasScene({
             },
             meta,
           });
+          persistNewPlacement(artifact.id, position.x, position.y);
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
@@ -318,6 +404,7 @@ function CanvasScene({
             },
             meta,
           });
+          persistNewPlacement(artifact.id, position.x, position.y);
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
@@ -363,23 +450,71 @@ function CanvasScene({
             ...(artifact.capturedFromUrl
               ? { capturedFromUrl: artifact.capturedFromUrl }
               : {}),
-            ...(artifact.profileUrl
-              ? { profileUrl: artifact.profileUrl }
-              : {}),
+            ...(artifact.profileUrl ? { profileUrl: artifact.profileUrl } : {}),
           },
         });
+        persistNewPlacement(artifact.id, position.x, position.y);
         renderedArtifactIdsRef.current.add(artifact.id);
         return;
       }
       if (artifact.type === "video") {
         const primaryId = String(toShapeId(artifact.id));
         const existing = editor.getShape(primaryId as any);
+        const src = artifact.dataUrl ?? artifact.sourceUrl;
         if (existing) {
+          if (existing.type === "video") {
+            const prevRev = Number(
+              (existing.meta as { videoReloadedAt?: number })
+                ?.videoReloadedAt ?? 0,
+            );
+            const newRev = Number(artifact.videoReloadedAt ?? 0);
+            const assetId = (existing.props as { assetId?: string }).assetId;
+            if (newRev > prevRev && src && assetId) {
+              const prevAsset = editor.getAsset(assetId as any);
+              editor.updateAssets([
+                {
+                  id: assetId as any,
+                  type: "video",
+                  typeName: "asset",
+                  props: {
+                    ...((prevAsset as { props?: object })?.props ?? {}),
+                    src,
+                    w: artifact.width ?? 420,
+                    h: artifact.height ?? 260,
+                    name: artifact.title,
+                    isAnimated: true,
+                    mimeType: "video/webm",
+                  },
+                  meta: (prevAsset as { meta?: object })?.meta ?? {},
+                },
+              ]);
+            }
+            editor.updateShape({
+              id: existing.id as any,
+              type: "video",
+              meta: {
+                ...((existing.meta as object) ?? {}),
+                sourceUrl: artifact.sourceUrl,
+                artifactId: artifact.id,
+                ...(artifact.capturedFromUrl
+                  ? { capturedFromUrl: artifact.capturedFromUrl }
+                  : {}),
+                ...(artifact.profileUrl
+                  ? { profileUrl: artifact.profileUrl }
+                  : {}),
+                ...(artifact.localVideoAbsolutePath
+                  ? { localVideoAbsolutePath: artifact.localVideoAbsolutePath }
+                  : {}),
+                ...(artifact.videoReloadedAt
+                  ? { videoReloadedAt: artifact.videoReloadedAt }
+                  : {}),
+              },
+            });
+          }
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
         const assetId = toAssetId(`${artifact.id}_video_asset`);
-        const src = artifact.dataUrl ?? artifact.sourceUrl;
         if (!src) return;
         editor.createAssets([
           {
@@ -414,12 +549,20 @@ function CanvasScene({
           },
           meta: {
             sourceUrl: artifact.sourceUrl,
+            artifactId: artifact.id,
             ...(artifact.capturedFromUrl
               ? { capturedFromUrl: artifact.capturedFromUrl }
               : {}),
             ...(artifact.profileUrl ? { profileUrl: artifact.profileUrl } : {}),
+            ...(artifact.localVideoAbsolutePath
+              ? { localVideoAbsolutePath: artifact.localVideoAbsolutePath }
+              : {}),
+            ...(artifact.videoReloadedAt
+              ? { videoReloadedAt: artifact.videoReloadedAt }
+              : {}),
           },
         });
+        persistNewPlacement(artifact.id, position.x, position.y);
         renderedArtifactIdsRef.current.add(artifact.id);
         return;
       }
@@ -454,6 +597,7 @@ function CanvasScene({
             props: { url: youtubeEmbedUrl, w: 560, h: 315 },
             meta: { sourceUrl: artifact.sourceUrl },
           });
+          persistNewPlacement(artifact.id, position.x, position.y);
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
@@ -518,6 +662,7 @@ function CanvasScene({
           },
           meta: { sourceUrl: artifact.sourceUrl },
         });
+        persistNewPlacement(artifact.id, position.x, position.y);
         renderedArtifactIdsRef.current.add(artifact.id);
         return;
       }
@@ -539,9 +684,10 @@ function CanvasScene({
         },
         meta: { sourceUrl: artifact.sourceUrl },
       });
+      persistNewPlacement(artifact.id, position.x, position.y);
       renderedArtifactIdsRef.current.add(artifact.id);
     });
-  }, [artifacts, deletedArtifactIds, editor]);
+  }, [artifacts, deletedArtifactIds, editor, placementEpoch]);
   return null;
 }
 
@@ -581,11 +727,12 @@ function ToolbarUrlButton() {
   const selectedIds = editor.getSelectedShapeIds();
   if (selectedIds.length !== 1) return null;
   const shape = editor.getShape(selectedIds[0]);
-  const meta = (shape?.meta as {
-    sourceUrl?: string;
-    capturedFromUrl?: string;
-    profileUrl?: string;
-  }) ?? {};
+  const meta =
+    (shape?.meta as {
+      sourceUrl?: string;
+      capturedFromUrl?: string;
+      profileUrl?: string;
+    }) ?? {};
   const sourceUrl = String(meta.sourceUrl ?? "");
   const capturedFromUrl = String(meta.capturedFromUrl ?? "");
   const profileUrl = String(meta.profileUrl ?? "");
@@ -788,6 +935,7 @@ function VideoToolbarWithUrl() {
     if (!fullBounds) return undefined;
     return new Box(fullBounds.x, fullBounds.y, fullBounds.width, 0);
   }, [editor]);
+
   if (!videoShapeId || !showToolbar || isLocked) return null;
 
   return (
@@ -812,11 +960,19 @@ export function ResearchCanvasApp() {
 
   const loadArtifacts = useCallback(async () => {
     const seq = (loadArtifactsSeq.current += 1);
-    const res = (await chrome.runtime.sendMessage({
-      type: "LIST_ARTIFACTS",
-    } as RuntimeMessage)) as { ok: boolean; artifacts: ArtifactRecord[] };
+    const base = await listArtifacts();
+    const withData: ArtifactRecord[] = await Promise.all(
+      base.map(async (row) => {
+        if (row.dataUrl) return row;
+        if (row.blobId) {
+          const dataUrl = await readBlobAsDataUrl(row.blobId);
+          return { ...row, dataUrl: dataUrl ?? undefined };
+        }
+        return row;
+      }),
+    );
     if (seq !== loadArtifactsSeq.current) return;
-    if (res.ok) setArtifacts(res.artifacts);
+    setArtifacts(withData);
   }, []);
 
   loadArtifactsRef.current = loadArtifacts;

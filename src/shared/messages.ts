@@ -39,6 +39,19 @@ export interface ArtifactRecord {
   textPresentation?: TextPresentation;
   /** Quote variant: persisted tldraw palette token for geo fill. */
   quoteColor?: QuoteColorToken;
+  /**
+   * Page-space position on the canvas when the artifact shape was first placed (or last saved).
+   * Used so sync does not re-derive placement from a changing viewport (tab switch, deferred media).
+   */
+  canvasX?: number;
+  canvasY?: number;
+  /**
+   * Absolute filesystem path to the mirrored recording file under Downloads (set after capture).
+   * Used to open the same file in Pimosa and reload after in-place edits.
+   */
+  localVideoAbsolutePath?: string;
+  /** Bumped when video bytes are re-imported from disk so the canvas asset can refresh. */
+  videoReloadedAt?: number;
 }
 
 export interface PendingCaptureRequest {
@@ -68,6 +81,13 @@ export type RuntimeMessage =
   /** Service worker → side panel document to dismiss the panel. */
   | { type: "CLOSE_SIDE_PANEL" }
   | { type: "DELETE_ARTIFACT"; artifactId: string }
+  /** Side panel → SW: persist page coordinates for stable artifact→shape placement across reloads. */
+  | {
+      type: "SET_ARTIFACT_CANVAS_POSITION";
+      artifactId: string;
+      canvasX: number;
+      canvasY: number;
+    }
   | { type: "LIST_ARTIFACTS" }
   | { type: "TRIGGER_CAPTURE"; action: CaptureAction }
   /** Recording finished in the page using `getDisplayMedia` (toolbar); background adds titles/URLs. */

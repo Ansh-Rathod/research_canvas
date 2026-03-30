@@ -30,6 +30,20 @@ export async function addArtifact(
   return artifact;
 }
 
+export async function setArtifactCanvasPosition(
+  artifactId: string,
+  canvasX: number,
+  canvasY: number,
+): Promise<boolean> {
+  if (!Number.isFinite(canvasX) || !Number.isFinite(canvasY)) return false;
+  const db = await getDb();
+  const row = await db.get("artifacts", artifactId);
+  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return false;
+  if (row.canvasX === canvasX && row.canvasY === canvasY) return true;
+  await db.put("artifacts", { ...row, canvasX, canvasY });
+  return true;
+}
+
 export async function deleteArtifact(artifactId: string): Promise<boolean> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
@@ -39,6 +53,15 @@ export async function deleteArtifact(artifactId: string): Promise<boolean> {
   }
   await db.delete("artifacts", artifactId);
   return true;
+}
+
+export async function getArtifact(
+  artifactId: string,
+): Promise<ArtifactRecord | null> {
+  const db = await getDb();
+  const row = await db.get("artifacts", artifactId);
+  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return null;
+  return row;
 }
 
 export async function listArtifacts(): Promise<ArtifactRecord[]> {
@@ -51,11 +74,16 @@ export async function listArtifacts(): Promise<ArtifactRecord[]> {
   return rows.sort((a, b) => a.createdAt - b.createdAt);
 }
 
+export async function readBlob(blobId: string): Promise<Blob | null> {
+  const db = await getDb();
+  const blob = await db.get("blobs", blobId);
+  return blob ?? null;
+}
+
 export async function readBlobAsDataUrl(
   blobId: string,
 ): Promise<string | null> {
-  const db = await getDb();
-  const blob = await db.get("blobs", blobId);
+  const blob = await readBlob(blobId);
   if (!blob) return null;
   const arrayBuffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(arrayBuffer);
@@ -64,4 +92,38 @@ export async function readBlobAsDataUrl(
     binary += String.fromCharCode(bytes[i]);
   const base64 = btoa(binary);
   return `data:${blob.type};base64,${base64}`;
+}
+
+export async function setArtifactLocalVideoPath(
+  artifactId: string,
+  localVideoAbsolutePath: string,
+): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.get("artifacts", artifactId);
+  if (!row || row.canvasId !== MAIN_DOCUMENT_ID || row.type !== "video") {
+    return false;
+  }
+  await db.put("artifacts", { ...row, localVideoAbsolutePath });
+  return true;
+}
+
+/**
+ * Replace the video blob in place and mark reload so the canvas can refresh the asset.
+ */
+export async function replaceVideoBlobFromDisk(
+  artifactId: string,
+  blob: Blob,
+): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.get("artifacts", artifactId);
+  if (!row || row.canvasId !== MAIN_DOCUMENT_ID || row.type !== "video") {
+    return false;
+  }
+  if (!row.blobId) return false;
+  await db.put("blobs", blob, row.blobId);
+  await db.put("artifacts", {
+    ...row,
+    videoReloadedAt: Date.now(),
+  });
+  return true;
 }

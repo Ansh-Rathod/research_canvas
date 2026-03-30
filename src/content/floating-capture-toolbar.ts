@@ -157,6 +157,12 @@ const ICON_RECORD_PLAY = "M8 5v14l11-7z";
 /** Checkmark — finish / save recording. */
 const ICON_RECORD_DONE =
   "M9 16.17L4.83 12l-1.42 1.41L9 19L21 7l-1.41-1.41L9 16.17z";
+/** Trash — clear recording buffer. */
+const ICON_CLEAR_RECORDING =
+  "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z";
+/** Retake — pick region again. */
+const ICON_RETAKE =
+  "M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z";
 
 type ToolbarAction =
   | "capture-area-image"
@@ -400,6 +406,9 @@ export function mountFloatingCaptureToolbar(options?: {
     flexDirection: "column",
     alignItems: "stretch",
     gap: "0",
+    alignSelf: "flex-start",
+    flexShrink: "0",
+    boxSizing: "border-box",
     maxHeight: "min(100vh - 24px, 560px)",
     overflowY: "auto",
     padding: "0",
@@ -412,6 +421,9 @@ export function mountFloatingCaptureToolbar(options?: {
     pointerEvents: "auto",
     fontFamily: "system-ui, -apple-system, sans-serif",
   });
+  /** Beat host `width: … !important` rules that would stretch the bar edge-to-edge. */
+  root.style.setProperty("width", "fit-content", "important");
+  root.style.setProperty("max-width", "calc(100vw - 24px)", "important");
 
   const saved = loadToolbarPos();
   if (saved) {
@@ -628,15 +640,36 @@ function setPauseButtonIcon(
   disableSvgPointerEvents(btn);
 }
 
+function stopRecorderAndWait(recorder: MediaRecorder): Promise<void> {
+  return new Promise((resolve) => {
+    if (recorder.state === "inactive") {
+      resolve();
+      return;
+    }
+    const onStop = () => {
+      recorder.removeEventListener("stop", onStop);
+      resolve();
+    };
+    recorder.addEventListener("stop", onStop);
+    recorder.stop();
+  });
+}
+
+export type ToolbarRecordingResult = "done" | "cancelled" | "retake";
+
 /**
  * Recording controls in the floating toolbar (below capture buttons), or a bottom bar if the toolbar is hidden.
  * Icon buttons match toolbar items; styled tooltips; auto-start recording.
  */
-export function showToolbarRecordingControls(
-  recorder: MediaRecorder,
-  removeOutline: () => void,
-): Promise<"done" | "cancelled"> {
+export function showToolbarRecordingControls(options: {
+  createRecorder: () => MediaRecorder;
+  clearChunks: () => void;
+  removeOutline: () => void;
+}): Promise<ToolbarRecordingResult> {
+  const { createRecorder, clearChunks, removeOutline } = options;
   return new Promise((resolve) => {
+    let recorder = createRecorder();
+
     const statusDot = document.createElement("span");
     Object.assign(statusDot.style, {
       width: "8px",
@@ -669,6 +702,30 @@ export function showToolbarRecordingControls(
     });
     metaRow.append(statusDot, timer);
 
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.setAttribute("aria-label", "Clear recording");
+    styleToolbarActionButton(clearBtn, "default");
+    clearBtn.append(svgIcon(ICON_CLEAR_RECORDING));
+    disableSvgPointerEvents(clearBtn);
+    bindHoverTooltip(
+      clearBtn,
+      "Clear recording — pauses, discards video captured so far, resets timer",
+    );
+    preventFocusScrollOnClick(clearBtn);
+
+    const retakeBtn = document.createElement("button");
+    retakeBtn.type = "button";
+    retakeBtn.setAttribute("aria-label", "Retake");
+    styleToolbarActionButton(retakeBtn, "default");
+    retakeBtn.append(svgIcon(ICON_RETAKE));
+    disableSvgPointerEvents(retakeBtn);
+    bindHoverTooltip(
+      retakeBtn,
+      "Retake — stop and pick capture region again (new screen share may be required)",
+    );
+    preventFocusScrollOnClick(retakeBtn);
+
     const pauseBtn = document.createElement("button");
     pauseBtn.type = "button";
     pauseBtn.setAttribute("aria-label", "Pause or resume recording");
@@ -699,6 +756,17 @@ export function showToolbarRecordingControls(
 
     let removeUi: () => void;
 
+    /** Single column: same order as the rest of the floating toolbar (vertical stack). */
+    const controlsColumn = document.createElement("div");
+    Object.assign(controlsColumn.style, {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      gap: "4px",
+      width: "100%",
+    });
+    controlsColumn.append(clearBtn, retakeBtn, pauseBtn, doneBtn);
+
     if (root && captureBar) {
       const strip = document.createElement("div");
       strip.setAttribute(RECORDING_STRIP_ATTR, "");
@@ -713,7 +781,7 @@ export function showToolbarRecordingControls(
         borderTop: "1px solid #fecaca",
         background: "#ffffff",
       });
-      strip.append(metaRow, pauseBtn, doneBtn);
+      strip.append(metaRow, controlsColumn);
       captureBar.insertAdjacentElement("afterend", strip);
       requestAnimationFrame(() => {
         root.scrollTop = root.scrollHeight;
@@ -758,7 +826,7 @@ export function showToolbarRecordingControls(
         gap: "4px",
       });
       fallbackMeta.append(statusDot, timer);
-      panel.append(fallbackMeta, pauseBtn, doneBtn);
+      panel.append(fallbackMeta, controlsColumn);
       appendToBody(panel);
       removeUi = () => panel.remove();
     }
@@ -797,6 +865,15 @@ export function showToolbarRecordingControls(
       timer.textContent = `${mm}:${ss}`;
     };
 
+    const resetTimerStateAfterClear = () => {
+      startedAt = Date.now();
+      pausedMs = 0;
+      pausedAt = 0;
+      timer.textContent = "00:00";
+      statusDot.style.background = "#dc2626";
+      setPauseButtonIcon(pauseBtn, false);
+    };
+
     try {
       recorder.start();
     } catch (e) {
@@ -810,6 +887,39 @@ export function showToolbarRecordingControls(
 
     startedAt = Date.now();
     timerId = window.setInterval(updateTimer, 250);
+
+    clearBtn.onclick = () => {
+      void (async () => {
+        if (recorder.state === "recording") {
+          recorder.pause();
+          pausedAt = Date.now();
+          statusDot.style.background = "#d97706";
+          setPauseButtonIcon(pauseBtn, true);
+        }
+        clearChunks();
+        await stopRecorderAndWait(recorder);
+        try {
+          recorder = createRecorder();
+          recorder.start();
+        } catch (e) {
+          window.alert(
+            e instanceof Error ? e.message : "Could not restart recording.",
+          );
+          cleanup();
+          resolve("cancelled");
+          return;
+        }
+        resetTimerStateAfterClear();
+      })();
+    };
+
+    retakeBtn.onclick = () => {
+      void (async () => {
+        await stopRecorderAndWait(recorder);
+        cleanup();
+        resolve("retake");
+      })();
+    };
 
     pauseBtn.onclick = () => {
       if (recorder.state === "recording") {

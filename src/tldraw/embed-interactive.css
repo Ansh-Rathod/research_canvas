@@ -20,12 +20,12 @@ iframe.tl-embed {
   cursor: default;
   pointer-events: none;
   z-index: 2;
-  background: rgba(15, 23, 42, 0.42);
+  background: rgba(15, 23, 42, 0);
   border-radius: inherit;
 }
 
 .research-video-play-overlay:hover {
-  background: rgba(15, 23, 42, 0.55);
+  background: rgba(15, 23, 42, 0);
 }
 
 .research-video-play-overlay:focus-visible {
@@ -33,11 +33,24 @@ iframe.tl-embed {
   outline-offset: 2px;
 }
 
-/* Scale with shape + zoom (fixed px looked wrong inside `.tl-counter-scaled`). */
+/* Compact circular “button” behind the play glyph (scales with `.tl-counter-scaled`). */
+.research-video-play-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(1.375rem, 15%, 1.875rem);
+  height: clamp(1.375rem, 15%, 1.875rem);
+  border-radius: 50%;
+  background: #111;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 40%);
+}
+
+/* Smaller triangle inside the circle. */
 .research-video-play-icon {
-  width: clamp(0.875rem, 28%, 5rem);
+  width: 60%;
+  /* max-width: 0.55rem; */
   height: auto;
-  aspect-ratio: 1;
   flex-shrink: 0;
-  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%));
+  margin-left: 1px;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 35%));
 }

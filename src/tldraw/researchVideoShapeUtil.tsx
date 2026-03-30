@@ -38,16 +38,12 @@ function BrokenAssetIcon() {
   );
 }
 
-/** Touch double-tap: max ms between taps and max px movement (same as typical OS double-tap). */
-const DOUBLE_TAP_MS = 400;
-const DOUBLE_TAP_MAX_DIST_PX = 32;
-
 /**
  * Fork of tldraw's video shape: no top-right hyperlink button; centered play overlay when paused
  * so recordings read clearly as video. Hyperlink removed — use shape meta + toolbar on image only.
  *
- * Playback: only starts/toggles via double-click / double-tap on the video while the shape is
- * selected; deselecting pauses. Native controls apply only in edit mode when zoomed in enough.
+ * Playback: single click / single tap on the video while the shape is selected toggles play/pause;
+ * deselecting pauses. Native controls apply only in edit mode when zoomed in enough.
  */
 const ResearchVideoShape = memo(function ResearchVideoShape({
   shape,
@@ -74,9 +70,6 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
   });
 
   const rVideo = useRef<HTMLVideoElement>(null!);
-  const rLastTouchTap = useRef<{ t: number; x: number; y: number } | null>(
-    null,
-  );
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [showPlayOverlay, setShowPlayOverlay] = useState(false);
@@ -118,8 +111,12 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
   const togglePlaybackFromGesture = useCallback(() => {
     const video = rVideo.current;
     if (!video || !isSelected || editingWithControls) return;
-    if (video.paused) void video.play();
-    else video.pause();
+    if (video.paused) {
+      video.muted = false;
+      void video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
   }, [editingWithControls, isSelected]);
 
   useEffect(() => {
@@ -149,35 +146,19 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
     !isFullscreen;
 
   let videoStyle: CSSProperties | undefined;
-  if (!isLoaded) {
-    videoStyle = { display: "none" };
-  } else if (isSelected || isEditing) {
+  if (isSelected || isEditing) {
     videoStyle = {
       pointerEvents: "all",
       ...(isSelected ? { touchAction: "manipulation" } : {}),
     };
   }
 
-  const handleVideoPointerUp = useCallback(
-    (e: React.PointerEvent<HTMLVideoElement>) => {
+  const handleVideoClick = useCallback(
+    (e: React.MouseEvent<HTMLVideoElement>) => {
       if (editingWithControls) return;
       if (!isSelected) return;
-      if (e.pointerType === "mouse") return;
-      const now = Date.now();
-      const { clientX: x, clientY: y } = e;
-      const prev = rLastTouchTap.current;
-      if (
-        prev &&
-        now - prev.t < DOUBLE_TAP_MS &&
-        Math.hypot(x - prev.x, y - prev.y) < DOUBLE_TAP_MAX_DIST_PX
-      ) {
-        rLastTouchTap.current = null;
-        e.preventDefault();
-        e.stopPropagation();
-        togglePlaybackFromGesture();
-        return;
-      }
-      rLastTouchTap.current = { t: now, x, y };
+      e.stopPropagation();
+      togglePlaybackFromGesture();
     },
     [editingWithControls, isSelected, togglePlaybackFromGesture],
   );
@@ -218,20 +199,13 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
                 draggable={false}
                 playsInline
                 autoPlay={false}
-                muted
                 loop
                 disableRemotePlayback
                 disablePictureInPicture
                 controls={editingWithControls}
                 onLoadedData={handleLoadedData}
-                hidden={!isLoaded}
                 aria-label={shape.props.altText}
-                onPointerUp={handleVideoPointerUp}
-                onDoubleClick={(e) => {
-                  if (editingWithControls) return;
-                  e.stopPropagation();
-                  togglePlaybackFromGesture();
-                }}
+                onClick={handleVideoClick}
               >
                 <source src={url} />
               </video>
@@ -242,14 +216,16 @@ const ResearchVideoShape = memo(function ResearchVideoShape({
                   aria-hidden
                   role="presentation"
                 >
-                  <svg
-                    className="research-video-play-icon"
-                    viewBox="0 0 24 24"
-                    fill="white"
-                    aria-hidden
-                  >
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
+                  <div className="research-video-play-button">
+                    <svg
+                      className="research-video-play-icon"
+                      viewBox="0 0 24 24"
+                      fill="white"
+                      aria-hidden
+                    >
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                  </div>
                 </div>
               ) : null}
             </>

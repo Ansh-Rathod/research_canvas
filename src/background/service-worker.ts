@@ -9,7 +9,7 @@ import {
   type RuntimeMessage,
 } from "@shared/messages";
 import { CAPTURE_RECT_INSET_PX, insetRect } from "@shared/captureRect";
-import { addArtifact, deleteArtifact } from "@storage/repositories";
+import { addArtifact, deleteArtifact, readBlobAsDataUrl } from "@storage/repositories";
 import { MAIN_DOCUMENT_ID } from "@shared/document";
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
@@ -124,6 +124,11 @@ async function setupContextMenus() {
 async function initializeExtension() {
   await setupContextMenus();
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  /** Default path for all tabs — omit `tabId` so the canvas is not configured per-tab. */
+  await chrome.sidePanel.setOptions({
+    path: "src/sidepanel/index.html",
+    enabled: true,
+  });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -205,14 +210,11 @@ async function notifyTabMessage(
  * `chrome.sidePanel.open()` must run in the same synchronous turn as a user gesture.
  * Any `await` before it (e.g. capture) invalidates the gesture — so we call this from
  * context menu handlers *before* starting async capture work.
+ * Panel path is set globally in `initializeExtension` — do not call `setOptions({ tabId })`
+ * here or Chrome treats the side panel as tab-specific.
  */
 function primeSidePanelFromUserGesture(tabId: number) {
   try {
-    void chrome.sidePanel.setOptions({
-      tabId,
-      path: "src/sidepanel/index.html",
-      enabled: true,
-    });
     void chrome.sidePanel.open({ tabId }).catch(() => {});
   } catch {
     /* ignore */
@@ -461,6 +463,18 @@ chrome.runtime.onMessage.addListener(
           await chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
         }
         sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "SET_ARTIFACT_CANVAS_POSITION") {
+        const { artifactId, canvasX, canvasY } = message;
+        const mod = await import("@storage/repositories");
+        const ok = await mod.setArtifactCanvasPosition(
+          artifactId,
+          canvasX,
+          canvasY,
+        );
+        sendResponse({ ok });
         return;
       }
 
