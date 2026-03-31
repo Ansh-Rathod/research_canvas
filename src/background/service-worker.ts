@@ -269,8 +269,32 @@ async function runCaptureFlow(
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === SHOW_FLOATING_TOOLBAR_MENU_ID) {
-    void chrome.storage.local.set({ floatingToolbarHidden: false });
-    if (tab?.id) primeSidePanelFromUserGesture(tab.id);
+    void (async () => {
+      if (tab?.url) {
+        try {
+          const url = new URL(tab.url);
+          if (url.protocol === "http:" || url.protocol === "https:") {
+            const hostname = url.hostname;
+            const raw = await chrome.storage.local.get(
+              "floatingToolbarVisibilityByDomain",
+            );
+            const map = (raw.floatingToolbarVisibilityByDomain ??
+              {}) as Record<string, boolean>;
+            if (hostname in map) {
+              delete map[hostname];
+              await chrome.storage.local.set({
+                floatingToolbarVisibilityByDomain: map,
+              });
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      } else {
+        await chrome.storage.local.set({ floatingToolbarHidden: false });
+      }
+      if (tab?.id) primeSidePanelFromUserGesture(tab.id);
+    })();
     return;
   }
   if (!tab?.id || !tab.url) return;
@@ -534,6 +558,28 @@ chrome.runtime.onMessage.addListener(
           }),
         );
         sendResponse({ ok: true, artifacts: withData });
+        return;
+      }
+
+      if (message.type === "APPLY_CANVAS_BACKUP") {
+        const backup = (message as any).backup as {
+          artifacts?: ArtifactRecord[];
+          deletedArtifactIds?: string[];
+        };
+        const artifacts = backup?.artifacts ?? [];
+        const deletedArtifactIds = backup?.deletedArtifactIds ?? [];
+        const mod = await import("@storage/repositories");
+        await mod.replaceArtifactsForCanvas(artifacts);
+        const raw = await chrome.storage.local.get(
+          "deletedArtifactIdsByCanvas",
+        );
+        const all = (raw.deletedArtifactIdsByCanvas ?? {}) as Record<
+          string,
+          string[]
+        >;
+        all[MAIN_DOCUMENT_ID] = Array.from(new Set(deletedArtifactIds));
+        await chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
+        sendResponse({ ok: true });
         return;
       }
     })().catch((error) => {

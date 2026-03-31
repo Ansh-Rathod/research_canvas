@@ -89,6 +89,17 @@ export type RuntimeMessage =
       canvasY: number;
     }
   | { type: "LIST_ARTIFACTS" }
+  | {
+      type: "APPLY_CANVAS_BACKUP";
+      backup: {
+        version: 1;
+        mainDocumentId: string;
+        createdAt: number;
+        tldrawSnapshot: unknown;
+        artifacts: ArtifactRecord[];
+        deletedArtifactIds: string[];
+      };
+    }
   | { type: "TRIGGER_CAPTURE"; action: CaptureAction }
   /** Recording finished in the page using `getDisplayMedia` (toolbar); background adds titles/URLs. */
   | {

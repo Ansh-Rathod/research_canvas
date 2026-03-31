@@ -6,11 +6,15 @@ import type { Editor } from "@tldraw/editor";
 import {
   Box,
   DefaultImageToolbarContent,
+  DefaultMainMenu,
+  DefaultMainMenuContent,
   DefaultVideoToolbarContent,
   renderPlaintextFromRichText,
   Tldraw,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
+  TldrawUiMenuGroup,
+  TldrawUiMenuItem,
   TldrawUiToolbarButton,
   toRichText,
   useEditor,
@@ -19,6 +23,13 @@ import {
 import "@tldraw/tldraw/tldraw.css";
 import type { TLRichText } from "@tldraw/tlschema";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  applyCanvasBackup,
+  buildCanvasBackup,
+  isCanvasBackup,
+  isTldrawSnapshot,
+  parseOfficialTldrawFile,
+} from "./backup";
 import "./embed-interactive.css";
 import { ResearchEmbedShapeUtil } from "./researchEmbedShapeUtil";
 import {
@@ -951,11 +962,43 @@ function VideoToolbarWithUrl() {
   );
 }
 
+function BackupMainMenu({
+  onExport,
+  onImportClick,
+}: {
+  onExport: () => void;
+  onImportClick: () => void;
+}) {
+  return (
+    <DefaultMainMenu>
+      <TldrawUiMenuGroup id="research-canvas-backup">
+        <TldrawUiMenuItem
+          id="research-canvas-export-backup"
+          label="Export canvas backup"
+          icon="download"
+          readonlyOk
+          onSelect={onExport}
+        />
+        <TldrawUiMenuItem
+          id="research-canvas-import-backup"
+          label="Import canvas backup"
+          icon="upload"
+          readonlyOk
+          onSelect={onImportClick}
+        />
+      </TldrawUiMenuGroup>
+      <DefaultMainMenuContent />
+    </DefaultMainMenu>
+  );
+}
+
 export function ResearchCanvasApp() {
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [sessionReady, setSessionReady] = useState(false);
   const loadArtifactsSeq = useRef(0);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
+  const editorRef = useRef<Editor | null>(null);
+  const [importStatus, setImportStatus] = useState<string>("");
 
   const isFullScreenTab = (() => {
     try {
@@ -1082,6 +1125,7 @@ export function ResearchCanvasApp() {
   }, []);
 
   const onTldrawMount = useCallback((editor: Editor) => {
+    editorRef.current = editor;
     migrateLegacyYoutubeEmbedUrls(editor);
     const gridSeededKey = `research-canvas-grid-seeded-v1-${MAIN_DOCUMENT_ID}`;
     try {
@@ -1093,6 +1137,143 @@ export function ResearchCanvasApp() {
       editor.updateInstanceState({ isGridMode: true });
     }
   }, []);
+
+  const handleExportBackup = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    try {
+      const backup = await buildCanvasBackup(editor);
+      const json = JSON.stringify(backup, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const date = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `research-canvas-backup-${date}.tldr`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Failed to export canvas backup:", error);
+      window.alert("Research Canvas: Failed to export backup.");
+    }
+  }, []);
+
+  const importFromFile = useCallback(
+    async (file: File) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      console.debug("[ResearchCanvas] import: picked file", {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      });
+      setImportStatus(`Importing ${file.name}...`);
+      const reader = new FileReader();
+      reader.onload = () => {
+        void (async () => {
+          try {
+            const text = String(reader.result || "");
+            console.debug("[ResearchCanvas] import: file text length", {
+              length: text.length,
+            });
+            const raw = JSON.parse(text);
+            console.debug("[ResearchCanvas] import: parsed JSON keys", {
+              keys: Object.keys(raw ?? {}),
+            });
+            const officialStoreSnapshot = parseOfficialTldrawFile(editor, text);
+            const isWrapped = isCanvasBackup(raw);
+            const isSnapshot = isTldrawSnapshot(raw);
+
+            if (
+              !officialStoreSnapshot &&
+              !isWrapped &&
+              !isSnapshot &&
+              !raw?.document &&
+              !raw?.store
+            ) {
+              throw new Error(
+                "Selected file is not a valid .tldr snapshot or Research Canvas backup.",
+              );
+            }
+
+            if (isWrapped) {
+              if (
+                raw.mainDocumentId &&
+                raw.mainDocumentId !== MAIN_DOCUMENT_ID &&
+                !window.confirm(
+                  "This backup was created for a different canvas document. Apply it anyway?",
+                )
+              ) {
+                setImportStatus("Import cancelled.");
+                return;
+              }
+            }
+            if (
+              !window.confirm(
+                "Importing will add pages from the file to your current canvas. Continue?",
+              )
+            ) {
+              setImportStatus("Import cancelled.");
+              return;
+            }
+            console.debug("[ResearchCanvas] import: applying data", {
+              officialTldrParsed: !!officialStoreSnapshot,
+              isWrappedBackup: isWrapped,
+              isSnapshot,
+            });
+            if (officialStoreSnapshot) {
+              await applyCanvasBackup(editor, officialStoreSnapshot as any);
+            } else if (isWrapped || isSnapshot || raw?.document || raw?.store) {
+              await applyCanvasBackup(editor, raw as any);
+            } else {
+              throw new Error("Could not parse import file.");
+            }
+            await loadArtifacts();
+            console.debug("[ResearchCanvas] import: completed");
+            setImportStatus("Import complete.");
+            window.alert(
+              "Research Canvas: Import complete. Check your page list.",
+            );
+          } catch (error) {
+            console.error("Failed to import canvas backup:", error);
+            const message =
+              error instanceof Error ? error.message : "Unknown import error.";
+            setImportStatus(`Import failed: ${message}`);
+            window.alert(`Research Canvas: Import failed. ${message}`);
+          }
+        })();
+      };
+      reader.readAsText(file);
+    },
+    [loadArtifacts],
+  );
+
+  const openImportPicker = useCallback(() => {
+    console.debug("[ResearchCanvas] import: open file picker");
+    setImportStatus("Opening file picker...");
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".tldr,.json,application/json,application/vnd.tldraw+json";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) {
+        setImportStatus("No file selected.");
+        return;
+      }
+      void importFromFile(file);
+    };
+    input.click();
+  }, [importFromFile]);
+
+  useEffect(() => {
+    if (!importStatus) return;
+    const timeout = window.setTimeout(() => {
+      setImportStatus("");
+    }, 4000);
+    return () => window.clearTimeout(timeout);
+  }, [importStatus]);
 
   const muted = "#555555";
 
@@ -1116,24 +1297,52 @@ export function ResearchCanvasApp() {
             Loading…
           </div>
         ) : (
-          <Tldraw
-            persistenceKey={`canvas-v2-${MAIN_DOCUMENT_ID}`}
-            embeds={RESEARCH_EMBED_DEFINITIONS}
-            shapeUtils={RESEARCH_SHAPE_UTILS}
-            onMount={onTldrawMount}
-            components={{
-              ImageToolbar: ImageToolbarWithUrl,
-              VideoToolbar: VideoToolbarWithUrl,
-            }}
-          >
-            <CanvasScene
-              artifacts={artifacts}
-              onArtifactsChanged={() => {
-                void loadArtifacts();
+          <>
+            {importStatus ? (
+              <div
+                onClick={() => setImportStatus("")}
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 12,
+                  zIndex: 9999,
+                  fontSize: 12,
+                  background: "rgba(17,24,39,0.9)",
+                  color: "white",
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  fontFamily: "system-ui, sans-serif",
+                  cursor: "pointer",
+                }}
+              >
+                {importStatus}
+              </div>
+            ) : null}
+            <Tldraw
+              persistenceKey={`canvas-v2-${MAIN_DOCUMENT_ID}`}
+              embeds={RESEARCH_EMBED_DEFINITIONS}
+              shapeUtils={RESEARCH_SHAPE_UTILS}
+              onMount={onTldrawMount}
+              components={{
+                ImageToolbar: ImageToolbarWithUrl,
+                VideoToolbar: VideoToolbarWithUrl,
+                MainMenu: () => (
+                  <BackupMainMenu
+                    onExport={handleExportBackup}
+                    onImportClick={openImportPicker}
+                  />
+                ),
               }}
-            />
-            <CaptureSourceContextToolbar />
-          </Tldraw>
+            >
+              <CanvasScene
+                artifacts={artifacts}
+                onArtifactsChanged={() => {
+                  void loadArtifacts();
+                }}
+              />
+              <CaptureSourceContextToolbar />
+            </Tldraw>
+          </>
         )}
       </main>
     </div>

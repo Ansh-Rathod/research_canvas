@@ -7,6 +7,8 @@ const TOOLBAR_ID = "research-canvas-float-toolbar-root";
 const TOOLBAR_POS_KEY = "research-canvas-float-toolbar-pos";
 const TOOLTIP_EL_ID = "research-canvas-toolbar-tooltip";
 export const FLOATING_TOOLBAR_HIDDEN_KEY = "floatingToolbarHidden";
+const FLOATING_TOOLBAR_VISIBILITY_BY_DOMAIN_KEY =
+  "floatingToolbarVisibilityByDomain";
 
 /** Content inset; icon hit targets are fixed size below. */
 const TOOLBAR_INNER_PADDING = "4px";
@@ -49,6 +51,45 @@ function appendToBody(node: HTMLElement): void {
     return;
   }
   document.documentElement.append(node);
+}
+
+function getCurrentDomainKey(): string | null {
+  try {
+    const url = new URL(window.location.href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.hostname;
+  } catch {
+    return null;
+  }
+}
+
+async function loadToolbarVisibilityMap(): Promise<Record<string, boolean>> {
+  try {
+    const raw = await chrome.storage.local.get(
+      FLOATING_TOOLBAR_VISIBILITY_BY_DOMAIN_KEY,
+    );
+    const map = raw[
+      FLOATING_TOOLBAR_VISIBILITY_BY_DOMAIN_KEY
+    ] as Record<string, boolean> | undefined;
+    if (map && typeof map === "object") {
+      return { ...map };
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+async function saveToolbarVisibilityMap(
+  map: Record<string, boolean>,
+): Promise<void> {
+  try {
+    await chrome.storage.local.set({
+      [FLOATING_TOOLBAR_VISIBILITY_BY_DOMAIN_KEY]: map,
+    });
+  } catch {
+    // ignore
+  }
 }
 
 function getTooltipEl(): HTMLDivElement {
@@ -533,9 +574,20 @@ export function mountFloatingCaptureToolbar(options?: {
   addUtilityButton(
     "Hide this toolbar — right-click the page → “Show Research Canvas floating toolbar” to bring it back",
     () => {
-      void chrome.storage.local.set({ [FLOATING_TOOLBAR_HIDDEN_KEY]: true });
-      removeFloatingTooltipNode();
-      root.remove();
+      const domainKey = getCurrentDomainKey();
+      if (!domainKey) {
+        void chrome.storage.local.set({ [FLOATING_TOOLBAR_HIDDEN_KEY]: true });
+        removeFloatingTooltipNode();
+        root.remove();
+        return;
+      }
+      void (async () => {
+        const map = await loadToolbarVisibilityMap();
+        map[domainKey] = true;
+        await saveToolbarVisibilityMap(map);
+        removeFloatingTooltipNode();
+        root.remove();
+      })();
     },
     svgIconStroke(ICON_HIDE_STROKE),
   );

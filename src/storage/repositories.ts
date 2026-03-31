@@ -127,3 +127,33 @@ export async function replaceVideoBlobFromDisk(
   });
   return true;
 }
+
+export async function replaceArtifactsForCanvas(
+  artifacts: ArtifactRecord[],
+): Promise<void> {
+  const db = await getDb();
+  const existing = await db.getAllFromIndex(
+    "artifacts",
+    "by-canvasId",
+    MAIN_DOCUMENT_ID,
+  );
+  for (const row of existing) {
+    if (row.blobId) {
+      await db.delete("blobs", row.blobId);
+    }
+    await db.delete("artifacts", row.id);
+  }
+  for (const artifact of artifacts) {
+    let next = { ...artifact };
+    if (artifact.dataUrl?.startsWith("data:video/")) {
+      const blob = await (await fetch(artifact.dataUrl)).blob();
+      const blobId = `blob_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      await db.put("blobs", blob, blobId);
+      next = { ...artifact, blobId, dataUrl: undefined };
+    }
+    await db.put("artifacts", next);
+  }
+}
+

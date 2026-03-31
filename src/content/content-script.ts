@@ -71,6 +71,37 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
   return true;
 });
 
+void (async () => {
+  try {
+    const url = new URL(window.location.href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      mountFloatingCaptureToolbar();
+      return;
+    }
+    const hostname = url.hostname;
+    const stored = await chrome.storage.local.get([
+      FLOATING_TOOLBAR_HIDDEN_KEY,
+      "floatingToolbarVisibilityByDomain",
+    ]);
+    const byDomain = (stored.floatingToolbarVisibilityByDomain ??
+      {}) as Record<string, boolean>;
+    // One-time migration: if map is empty but old global hidden flag is set, treat current domain as hidden.
+    if (
+      Object.keys(byDomain).length === 0 &&
+      stored[STRING(FLOATING_TOOLBAR_HIDDEN_KEY)] === true
+    ) {
+      byDomain[hostname] = true;
+      await chrome.storage.local.set({ floatingToolbarVisibilityByDomain: byDomain });
+    }
+    const hiddenForDomain = byDomain[hostname] === true;
+    if (!hiddenForDomain) {
+      mountFloatingCaptureToolbar();
+    }
+  } catch {
+    mountFloatingCaptureToolbar();
+  }
+})();
+
 
 type RectPickResult = {
   rect: Rect;
