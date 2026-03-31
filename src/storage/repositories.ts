@@ -7,7 +7,9 @@ function makeId(prefix: string) {
 }
 
 export async function addArtifact(
-  input: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">,
+  input: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt"> & {
+    canvasId?: string;
+  },
 ): Promise<ArtifactRecord> {
   const db = await getDb();
   const id = makeId("artifact");
@@ -23,7 +25,7 @@ export async function addArtifact(
     dataUrl,
     id,
     blobId,
-    canvasId: MAIN_DOCUMENT_ID,
+    canvasId: input.canvasId ?? MAIN_DOCUMENT_ID,
     createdAt: Date.now(),
   };
   await db.put("artifacts", artifact);
@@ -32,13 +34,14 @@ export async function addArtifact(
 
 export async function setArtifactCanvasPosition(
   artifactId: string,
+  canvasId: string,
   canvasX: number,
   canvasY: number,
 ): Promise<boolean> {
   if (!Number.isFinite(canvasX) || !Number.isFinite(canvasY)) return false;
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return false;
+  if (!row || row.canvasId !== canvasId) return false;
   if (row.canvasX === canvasX && row.canvasY === canvasY) return true;
   await db.put("artifacts", { ...row, canvasX, canvasY });
   return true;
@@ -47,7 +50,7 @@ export async function setArtifactCanvasPosition(
 export async function deleteArtifact(artifactId: string): Promise<boolean> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return false;
+  if (!row) return false;
   if (row.blobId) {
     await db.delete("blobs", row.blobId);
   }
@@ -60,17 +63,13 @@ export async function getArtifact(
 ): Promise<ArtifactRecord | null> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== MAIN_DOCUMENT_ID) return null;
+  if (!row) return null;
   return row;
 }
 
 export async function listArtifacts(): Promise<ArtifactRecord[]> {
   const db = await getDb();
-  const rows = await db.getAllFromIndex(
-    "artifacts",
-    "by-canvasId",
-    MAIN_DOCUMENT_ID,
-  );
+  const rows = await db.getAll("artifacts");
   return rows.sort((a, b) => a.createdAt - b.createdAt);
 }
 
@@ -100,7 +99,7 @@ export async function setArtifactLocalVideoPath(
 ): Promise<boolean> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== MAIN_DOCUMENT_ID || row.type !== "video") {
+  if (!row || row.type !== "video") {
     return false;
   }
   await db.put("artifacts", { ...row, localVideoAbsolutePath });
@@ -116,7 +115,7 @@ export async function replaceVideoBlobFromDisk(
 ): Promise<boolean> {
   const db = await getDb();
   const row = await db.get("artifacts", artifactId);
-  if (!row || row.canvasId !== MAIN_DOCUMENT_ID || row.type !== "video") {
+  if (!row || row.type !== "video") {
     return false;
   }
   if (!row.blobId) return false;
@@ -129,13 +128,14 @@ export async function replaceVideoBlobFromDisk(
 }
 
 export async function replaceArtifactsForCanvas(
+  canvasId: string,
   artifacts: ArtifactRecord[],
 ): Promise<void> {
   const db = await getDb();
   const existing = await db.getAllFromIndex(
     "artifacts",
     "by-canvasId",
-    MAIN_DOCUMENT_ID,
+    canvasId,
   );
   for (const row of existing) {
     if (row.blobId) {
@@ -153,7 +153,7 @@ export async function replaceArtifactsForCanvas(
       await db.put("blobs", blob, blobId);
       next = { ...artifact, blobId, dataUrl: undefined };
     }
-    await db.put("artifacts", next);
+    await db.put("artifacts", { ...next, canvasId });
   }
 }
 

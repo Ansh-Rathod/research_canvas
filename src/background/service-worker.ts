@@ -13,6 +13,11 @@ import { addArtifact, deleteArtifact, readBlobAsDataUrl } from "@storage/reposit
 import { MAIN_DOCUMENT_ID } from "@shared/document";
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
+const ACTION_POPUP_PATH = "src/popup/index.html";
+
+async function setActionPopupEnabled(enabled: boolean) {
+  await chrome.action.setPopup({ popup: enabled ? ACTION_POPUP_PATH : "" });
+}
 
 /**
  * Updated synchronously when the side panel sends `SIDE_PANEL_HEARTBEAT` (no storage `await`
@@ -24,8 +29,9 @@ function createRequest(
   tabId: number,
   action: CaptureAction,
   sourceUrl: string,
-  mediaType?: "image" | "video",
-  mediaUrl?: string,
+  mediaType: "image" | "video" | undefined,
+  mediaUrl: string | undefined,
+  canvasId: string,
 ): PendingCaptureRequest {
   return {
     id: `${action}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -34,6 +40,7 @@ function createRequest(
     sourceUrl,
     mediaType,
     mediaUrl,
+    canvasId,
   };
 }
 
@@ -123,12 +130,13 @@ async function setupContextMenus() {
 
 async function initializeExtension() {
   await setupContextMenus();
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
   /** Default path for all tabs — omit `tabId` so the canvas is not configured per-tab. */
   await chrome.sidePanel.setOptions({
     path: "src/sidepanel/index.html",
     enabled: true,
   });
+  await setActionPopupEnabled(true);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -138,6 +146,29 @@ chrome.runtime.onStartup.addListener(() => {
   void initializeExtension();
 });
 void initializeExtension();
+
+chrome.action.onClicked.addListener(() => {
+  void (async () => {
+    const panelSeemsLive =
+      lastSidePanelHeartbeatAtMs > 0 &&
+      Date.now() - lastSidePanelHeartbeatAtMs < 12000;
+    if (!panelSeemsLive) {
+      // If popup is disabled due to stale state, restore it.
+      await setActionPopupEnabled(true);
+      return;
+    }
+    try {
+      await chrome.runtime.sendMessage({
+        type: "CLOSE_SIDE_PANEL",
+      } as RuntimeMessage);
+    } catch {
+      /* side panel not listening */
+    }
+    await chrome.storage.local.remove("sidePanelHeartbeatAt");
+    lastSidePanelHeartbeatAtMs = 0;
+    await setActionPopupEnabled(true);
+  })();
+});
 
 async function ensureContentScript(tabId: number) {
   try {
@@ -159,6 +190,34 @@ function isWebPageUrl(url: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+async function setFloatingToolbarForTab(
+  tab: chrome.tabs.Tab,
+  visible: boolean,
+): Promise<{ ok: boolean; error?: string; visible?: boolean }> {
+  if (!tab.id) return { ok: false, error: "No active tab." };
+  if (!isWebPageUrl(tab.url)) {
+    return { ok: false, error: "Floating toolbar is only available on web pages." };
+  }
+  const hostname = new URL(tab.url!).hostname;
+  const raw = await chrome.storage.local.get("floatingToolbarVisibilityByDomain");
+  const map = (raw.floatingToolbarVisibilityByDomain ?? {}) as Record<
+    string,
+    boolean
+  >;
+  if (visible) {
+    map[hostname] = true;
+  } else {
+    delete map[hostname];
+  }
+  await chrome.storage.local.set({ floatingToolbarVisibilityByDomain: map });
+  await ensureContentScript(tab.id);
+  await chrome.tabs.sendMessage(tab.id, {
+    type: "SET_FLOATING_TOOLBAR_VISIBILITY",
+    visible,
+  } as RuntimeMessage);
+  return { ok: true, visible };
 }
 
 async function notifyTabMessage(
@@ -224,9 +283,10 @@ function primeSidePanelFromUserGesture(tabId: number) {
 async function finalizeCaptureOutcome(
   tab: chrome.tabs.Tab,
   artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">,
+  canvasId: string,
 ) {
   if (!tab.id) return;
-  const saved = await addArtifact(artifact);
+  const saved = await addArtifact({ ...artifact, canvasId });
   await chrome.runtime.sendMessage({
     type: "OPEN_CANVAS",
     artifactId: saved.id,
@@ -250,16 +310,24 @@ async function runCaptureFlow(
     return;
   }
 
+  const stored = await chrome.storage.local.get(
+    "researchCanvasLastOpenCanvasId",
+  );
+  const canvasId =
+    (typeof stored.researchCanvasLastOpenCanvasId === "string" &&
+      stored.researchCanvasLastOpenCanvasId) ||
+    MAIN_DOCUMENT_ID;
   const request = createRequest(
     tab.id,
     action,
     tab.url,
     options?.mediaType,
     options?.mediaUrl,
+    canvasId,
   );
   try {
     const artifact = await captureArtifactForRequest(request);
-    await finalizeCaptureOutcome(tab, artifact);
+    await finalizeCaptureOutcome(tab, artifact, request.canvasId ?? canvasId);
   } catch (error) {
     console.error("Capture action failed:", error);
     const msg = error instanceof Error ? error.message : String(error);
@@ -270,30 +338,9 @@ async function runCaptureFlow(
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === SHOW_FLOATING_TOOLBAR_MENU_ID) {
     void (async () => {
-      if (tab?.url) {
-        try {
-          const url = new URL(tab.url);
-          if (url.protocol === "http:" || url.protocol === "https:") {
-            const hostname = url.hostname;
-            const raw = await chrome.storage.local.get(
-              "floatingToolbarVisibilityByDomain",
-            );
-            const map = (raw.floatingToolbarVisibilityByDomain ??
-              {}) as Record<string, boolean>;
-            if (hostname in map) {
-              delete map[hostname];
-              await chrome.storage.local.set({
-                floatingToolbarVisibilityByDomain: map,
-              });
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-      } else {
-        await chrome.storage.local.set({ floatingToolbarHidden: false });
-      }
-      if (tab?.id) primeSidePanelFromUserGesture(tab.id);
+      if (!tab) return;
+      await setFloatingToolbarForTab(tab, true);
+      if (tab.id) primeSidePanelFromUserGesture(tab.id);
     })();
     return;
   }
@@ -359,12 +406,14 @@ chrome.runtime.onMessage.addListener(
 
       if (message.type === "SIDE_PANEL_HEARTBEAT") {
         lastSidePanelHeartbeatAtMs = Date.now();
+        await setActionPopupEnabled(false);
         sendResponse({ ok: true });
         return;
       }
 
       if (message.type === "SIDE_PANEL_HIDDEN") {
         lastSidePanelHeartbeatAtMs = 0;
+        await setActionPopupEnabled(true);
         sendResponse({ ok: true });
         return;
       }
@@ -393,6 +442,33 @@ chrome.runtime.onMessage.addListener(
           primeSidePanelFromUserGesture(tabId);
         }
         sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "OPEN_BOARD_SIDEBAR") {
+        primeSidePanelFromUserGesture(message.tabId);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "GET_FLOATING_TOOLBAR_FOR_TAB") {
+        const tab = await chrome.tabs.get(message.tabId);
+        if (!isWebPageUrl(tab.url)) {
+          sendResponse({ ok: false, error: "Not a normal web page.", visible: false });
+          return;
+        }
+        const hostname = new URL(tab.url!).hostname;
+        const raw = await chrome.storage.local.get("floatingToolbarVisibilityByDomain");
+        const map = (raw.floatingToolbarVisibilityByDomain ??
+          {}) as Record<string, boolean>;
+        sendResponse({ ok: true, visible: map[hostname] === true });
+        return;
+      }
+
+      if (message.type === "SET_FLOATING_TOOLBAR_FOR_TAB") {
+        const tab = await chrome.tabs.get(message.tabId);
+        const result = await setFloatingToolbarForTab(tab, message.visible);
+        sendResponse(result);
         return;
       }
 
@@ -486,7 +562,14 @@ chrome.runtime.onMessage.addListener(
           height,
         };
         try {
-          await finalizeCaptureOutcome(tab, artifact);
+          const stored = await chrome.storage.local.get(
+            "researchCanvasLastOpenCanvasId",
+          );
+          const canvasId =
+            (typeof stored.researchCanvasLastOpenCanvasId === "string" &&
+              stored.researchCanvasLastOpenCanvasId) ||
+            MAIN_DOCUMENT_ID;
+          await finalizeCaptureOutcome(tab, artifact, canvasId);
           sendResponse({ ok: true });
         } catch (error) {
           sendResponse({
@@ -518,25 +601,29 @@ chrome.runtime.onMessage.addListener(
 
       if (message.type === "DELETE_ARTIFACT") {
         const { artifactId } = message;
-        await deleteArtifact(artifactId);
-        const tomb = (
+        const ok = await deleteArtifact(artifactId);
+        const tomb = ok
+          ? (
           await chrome.storage.local.get("deletedArtifactIdsByCanvas")
-        ).deletedArtifactIdsByCanvas as Record<string, string[]> | undefined;
-        const key = MAIN_DOCUMENT_ID;
-        if (tomb?.[key]?.length) {
-          const nextList = tomb[key].filter((id) => id !== artifactId);
-          const all = { ...tomb, [key]: nextList };
+        ).deletedArtifactIdsByCanvas as Record<string, string[]> | undefined
+          : undefined;
+        if (tomb) {
+          const all: Record<string, string[]> = {};
+          for (const [canvasId, list] of Object.entries(tomb)) {
+            all[canvasId] = list.filter((id) => id !== artifactId);
+          }
           await chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
         }
-        sendResponse({ ok: true });
+        sendResponse({ ok });
         return;
       }
 
       if (message.type === "SET_ARTIFACT_CANVAS_POSITION") {
-        const { artifactId, canvasX, canvasY } = message;
+        const { artifactId, canvasId, canvasX, canvasY } = message;
         const mod = await import("@storage/repositories");
         const ok = await mod.setArtifactCanvasPosition(
           artifactId,
+          canvasId,
           canvasX,
           canvasY,
         );
@@ -547,8 +634,11 @@ chrome.runtime.onMessage.addListener(
       if (message.type === "LIST_ARTIFACTS") {
         const mod = await import("@storage/repositories");
         const artifacts = await mod.listArtifacts();
+        const filtered = artifacts.filter((row) =>
+          message.canvasId ? row.canvasId === message.canvasId : true,
+        );
         const withData = await Promise.all(
-          artifacts.map(async (row) => {
+          filtered.map(async (row) => {
             if (row.dataUrl) return row;
             if (row.blobId) {
               const dataUrl = await mod.readBlobAsDataUrl(row.blobId);
@@ -563,13 +653,15 @@ chrome.runtime.onMessage.addListener(
 
       if (message.type === "APPLY_CANVAS_BACKUP") {
         const backup = (message as any).backup as {
+          mainDocumentId?: string;
           artifacts?: ArtifactRecord[];
           deletedArtifactIds?: string[];
         };
         const artifacts = backup?.artifacts ?? [];
         const deletedArtifactIds = backup?.deletedArtifactIds ?? [];
+        const canvasId = backup?.mainDocumentId ?? MAIN_DOCUMENT_ID;
         const mod = await import("@storage/repositories");
-        await mod.replaceArtifactsForCanvas(artifacts);
+        await mod.replaceArtifactsForCanvas(canvasId, artifacts);
         const raw = await chrome.storage.local.get(
           "deletedArtifactIdsByCanvas",
         );
@@ -577,7 +669,7 @@ chrome.runtime.onMessage.addListener(
           string,
           string[]
         >;
-        all[MAIN_DOCUMENT_ID] = Array.from(new Set(deletedArtifactIds));
+        all[canvasId] = Array.from(new Set(deletedArtifactIds));
         await chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
         sendResponse({ ok: true });
         return;

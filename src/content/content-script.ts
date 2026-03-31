@@ -1,6 +1,5 @@
 import type { RuntimeMessage } from "@shared/messages";
 import {
-  FLOATING_TOOLBAR_HIDDEN_KEY,
   mountFloatingCaptureToolbar,
   showToolbarRecordingControls,
   unmountFloatingCaptureToolbar,
@@ -65,6 +64,18 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
       return;
     }
 
+    if (message.type === "SET_FLOATING_TOOLBAR_VISIBILITY") {
+      if (message.visible) {
+        mountFloatingCaptureToolbar({
+          onRecordingAction: beginToolbarRecordingFromClick,
+        });
+      } else {
+        unmountFloatingCaptureToolbar();
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+
   })().catch((error) => {
     sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
   });
@@ -79,26 +90,17 @@ void (async () => {
       return;
     }
     const hostname = url.hostname;
-    const stored = await chrome.storage.local.get([
-      FLOATING_TOOLBAR_HIDDEN_KEY,
-      "floatingToolbarVisibilityByDomain",
-    ]);
+    const stored = await chrome.storage.local.get("floatingToolbarVisibilityByDomain");
     const byDomain = (stored.floatingToolbarVisibilityByDomain ??
       {}) as Record<string, boolean>;
-    // One-time migration: if map is empty but old global hidden flag is set, treat current domain as hidden.
-    if (
-      Object.keys(byDomain).length === 0 &&
-      stored[STRING(FLOATING_TOOLBAR_HIDDEN_KEY)] === true
-    ) {
-      byDomain[hostname] = true;
-      await chrome.storage.local.set({ floatingToolbarVisibilityByDomain: byDomain });
-    }
-    const hiddenForDomain = byDomain[hostname] === true;
-    if (!hiddenForDomain) {
-      mountFloatingCaptureToolbar();
+    const visibleForDomain = byDomain[hostname] === true;
+    if (visibleForDomain) {
+      mountFloatingCaptureToolbar({
+        onRecordingAction: beginToolbarRecordingFromClick,
+      });
     }
   } catch {
-    mountFloatingCaptureToolbar();
+    // keep hidden by default on errors
   }
 })();
 
@@ -555,29 +557,3 @@ function mapRectToVideoSource(
   };
 }
 
-function tryMountFloatingToolbar() {
-  void chrome.storage.local.get(FLOATING_TOOLBAR_HIDDEN_KEY, (r) => {
-    if (r[FLOATING_TOOLBAR_HIDDEN_KEY]) return;
-    try {
-      mountFloatingCaptureToolbar({
-        onRecordingAction: beginToolbarRecordingFromClick,
-      });
-    } catch (e) {
-      console.error("Research Canvas: failed to mount floating toolbar", e);
-    }
-  });
-}
-
-tryMountFloatingToolbar();
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !changes[FLOATING_TOOLBAR_HIDDEN_KEY]) return;
-  const v = changes[FLOATING_TOOLBAR_HIDDEN_KEY].newValue as
-    | boolean
-    | undefined;
-  if (v === true) {
-    unmountFloatingCaptureToolbar();
-  } else if (v === false) {
-    tryMountFloatingToolbar();
-  }
-});

@@ -32,7 +32,8 @@
     "default_path": "src/sidepanel/index.html"
   },
   "action": {
-    "default_title": "Research Canvas"
+    "default_title": "Research Canvas",
+    "default_popup": "src/popup/index.html"
   },
   "commands": {
     "capture-area-image": {

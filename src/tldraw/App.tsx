@@ -1,5 +1,14 @@
-import { MAIN_DOCUMENT_ID } from "@shared/document";
 import { type ArtifactRecord, type RuntimeMessage } from "@shared/messages";
+import type { CanvasMeta } from "@storage/canvases";
+import {
+  getLastOpenCanvasId,
+  loadCanvases,
+  makeCanvasId,
+  nextCanvasName,
+  saveCanvases,
+  setLastOpenCanvasId,
+  withUpdatedTimestamp,
+} from "@storage/canvases";
 import { listArtifacts, readBlobAsDataUrl } from "@storage/repositories";
 import { mergeDeletedArtifactTombstones } from "@storage/tombstones";
 import type { Editor } from "@tldraw/editor";
@@ -10,11 +19,10 @@ import {
   DefaultMainMenuContent,
   DefaultVideoToolbarContent,
   renderPlaintextFromRichText,
+  serializeTldrawJson,
   Tldraw,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
-  TldrawUiMenuGroup,
-  TldrawUiMenuItem,
   TldrawUiToolbarButton,
   toRichText,
   useEditor,
@@ -25,7 +33,6 @@ import type { TLRichText } from "@tldraw/tlschema";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyCanvasBackup,
-  buildCanvasBackup,
   isCanvasBackup,
   isTldrawSnapshot,
   parseOfficialTldrawFile,
@@ -115,7 +122,7 @@ function resolveArtifactPlacement(
   editor: Editor,
   artifact: ArtifactRecord,
   index: number,
-): { x: number; y: number } {
+): { x: number; y: number } | null {
   const cx = artifact.canvasX;
   const cy = artifact.canvasY;
   if (
@@ -129,7 +136,9 @@ function resolveArtifactPlacement(
   if (isPlacementEnvironmentViable(editor)) {
     return artifactPositionInViewport(editor, index);
   }
-  return artifactGridFallbackPosition(index);
+  // Avoid persisting unstable fallback coords while hidden / zero-size.
+  // We'll retry on the next visibility/resize epoch.
+  return null;
 }
 
 function toShapeId(id: string) {
@@ -143,9 +152,11 @@ function toAssetId(id: string) {
 function CanvasScene({
   artifacts,
   onArtifactsChanged,
+  canvasId,
 }: {
   artifacts: ArtifactRecord[];
   onArtifactsChanged?: () => void;
+  canvasId: string;
 }) {
   const editor = useEditor();
   const renderedArtifactIdsRef = useRef<Set<string>>(new Set());
@@ -198,7 +209,7 @@ function CanvasScene({
           string,
           string[]
         >;
-        setDeletedArtifactIds(all[MAIN_DOCUMENT_ID] ?? []);
+        setDeletedArtifactIds(all[canvasId] ?? []);
       })
       .catch(() => {
         if (!cancelled) setDeletedArtifactIds([]);
@@ -206,7 +217,7 @@ function CanvasScene({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [canvasId]);
 
   useEffect(() => {
     if (deletedArtifactIds === null) return;
@@ -216,15 +227,21 @@ function CanvasScene({
         string,
         string[]
       >;
-      all[MAIN_DOCUMENT_ID] = unique;
+      all[canvasId] = unique;
       void chrome.storage.local.set({ deletedArtifactIdsByCanvas: all });
     });
-  }, [deletedArtifactIds]);
+  }, [deletedArtifactIds, canvasId]);
 
   useEffect(() => {
     if (!editor) return;
     editor.selectNone();
   }, [editor]);
+
+  useEffect(() => {
+    renderedArtifactIdsRef.current.clear();
+    pendingDeletedArtifactIdsRef.current.clear();
+    setDeletedArtifactIds(null);
+  }, [canvasId]);
 
   useEffect(() => {
     if (!editor) return;
@@ -294,6 +311,7 @@ function CanvasScene({
         .sendMessage({
           type: "SET_ARTIFACT_CANVAS_POSITION",
           artifactId,
+          canvasId,
           canvasX: x,
           canvasY: y,
         } as RuntimeMessage)
@@ -303,6 +321,7 @@ function CanvasScene({
     artifacts.forEach((artifact, index) => {
       if (deletedSet.has(artifact.id)) return;
       const position = resolveArtifactPlacement(editor, artifact, index);
+      if (!position) return;
       if (artifact.type === "text") {
         /** Legacy text artifacts omit this; match previous plain-text appearance via body styling. */
         const presentation = artifact.textPresentation ?? "body";
@@ -962,43 +981,46 @@ function VideoToolbarWithUrl() {
   );
 }
 
-function BackupMainMenu({
-  onExport,
-  onImportClick,
-}: {
-  onExport: () => void;
-  onImportClick: () => void;
-}) {
+function BackupMainMenu() {
   return (
     <DefaultMainMenu>
-      <TldrawUiMenuGroup id="research-canvas-backup">
-        <TldrawUiMenuItem
-          id="research-canvas-export-backup"
-          label="Export canvas backup"
-          icon="download"
-          readonlyOk
-          onSelect={onExport}
-        />
-        <TldrawUiMenuItem
-          id="research-canvas-import-backup"
-          label="Import canvas backup"
-          icon="upload"
-          readonlyOk
-          onSelect={onImportClick}
-        />
-      </TldrawUiMenuGroup>
       <DefaultMainMenuContent />
     </DefaultMainMenu>
   );
 }
 
+const TLDRAW_COMPONENTS = {
+  ImageToolbar: ImageToolbarWithUrl,
+  VideoToolbar: VideoToolbarWithUrl,
+  MainMenu: BackupMainMenu,
+  ColorSchemeMenu: null,
+} as any;
+
+type PendingImport = {
+  canvasId: string;
+  snapshot: unknown;
+  sourceKind: "wrapped-backup" | "official-tldr" | "raw-snapshot";
+  applyMode: "merge" | "restore";
+};
+
 export function ResearchCanvasApp() {
+  const [canvases, setCanvases] = useState<CanvasMeta[]>([]);
+  const [currentCanvasId, setCurrentCanvasId] = useState<string | null>(null);
+  const [isBlurredPrivate, setIsBlurredPrivate] = useState(false);
+  const [importStatus, setImportStatus] = useState<string>("");
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [openCanvasMenuId, setOpenCanvasMenuId] = useState<string | null>(null);
+  const [uiTheme, setUiTheme] = useState<"light" | "dark">("light");
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [sessionReady, setSessionReady] = useState(false);
+  const [mountedEditorCanvasId, setMountedEditorCanvasId] = useState<
+    string | null
+  >(null);
   const loadArtifactsSeq = useRef(0);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
   const editorRef = useRef<Editor | null>(null);
-  const [importStatus, setImportStatus] = useState<string>("");
+  const unlockedPrivateCanvasesRef = useRef<Set<string>>(new Set());
+  const pendingImportRef = useRef<PendingImport | null>(null);
 
   const isFullScreenTab = (() => {
     try {
@@ -1009,6 +1031,25 @@ export function ResearchCanvasApp() {
     }
   })();
   const isSidePanelMode = !isFullScreenTab;
+
+  const currentCanvas = canvases.find((c) => c.id === currentCanvasId) ?? null;
+  const effectiveCanvasId = currentCanvas?.id ?? "main";
+  const isDarkTheme = uiTheme === "dark";
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("research-canvas-ui-theme");
+      if (saved === "dark" || saved === "light") {
+        setUiTheme(saved);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("research-canvas-ui-theme", uiTheme);
+    } catch {}
+  }, [uiTheme]);
 
   const loadArtifacts = useCallback(async () => {
     const seq = (loadArtifactsSeq.current += 1);
@@ -1024,8 +1065,8 @@ export function ResearchCanvasApp() {
       }),
     );
     if (seq !== loadArtifactsSeq.current) return;
-    setArtifacts(withData);
-  }, []);
+    setArtifacts(withData.filter((row) => row.canvasId === effectiveCanvasId));
+  }, [effectiveCanvasId]);
 
   loadArtifactsRef.current = loadArtifacts;
 
@@ -1035,6 +1076,16 @@ export function ResearchCanvasApp() {
     void (async () => {
       await mergeDeletedArtifactTombstones();
       if (cancelled) return;
+      const storedCanvases = await loadCanvases();
+      const lastId = await getLastOpenCanvasId();
+      const initial =
+        storedCanvases.find((c) => c.id === lastId) ?? storedCanvases[0];
+      setCanvases(storedCanvases);
+      setCurrentCanvasId(initial.id);
+      const isPrivate = !!initial.isPrivate;
+      const unlocked = unlockedPrivateCanvasesRef.current.has(initial.id);
+      setIsBlurredPrivate(isPrivate && !unlocked);
+      if (cancelled) return;
       await loadArtifacts();
       if (!cancelled) setSessionReady(true);
     })();
@@ -1042,6 +1093,47 @@ export function ResearchCanvasApp() {
       cancelled = true;
     };
   }, [loadArtifacts]);
+
+  useEffect(() => {
+    const pending = pendingImportRef.current;
+    if (!pending) return;
+    if (pending.canvasId !== effectiveCanvasId) return;
+    if (mountedEditorCanvasId !== pending.canvasId) {
+      console.debug("[ResearchCanvas] import: waiting for editor mount", {
+        pendingCanvasId: pending.canvasId,
+        mountedEditorCanvasId,
+      });
+      return;
+    }
+    const editor = editorRef.current;
+    if (!editor) return;
+    void (async () => {
+      try {
+        await applyCanvasBackup(editor, pending.snapshot as any, {
+          mode: pending.applyMode,
+        });
+        await loadArtifacts();
+        console.debug("[ResearchCanvas] import: apply completed", {
+          sourceKind: pending.sourceKind,
+        });
+        setImportStatus("Import complete.");
+        window.alert("Research Canvas: Import complete. Check your page list.");
+      } catch (error) {
+        console.error("Failed to apply imported canvas backup:", error);
+        const message =
+          error instanceof Error ? error.message : "Unknown import error.";
+        const userMessage = message.includes("empty")
+          ? "Import failed: the file snapshot is empty."
+          : message.includes("readable tldraw snapshot")
+            ? "Import failed: this file does not contain a compatible snapshot."
+            : `Import failed: ${message}`;
+        setImportStatus(userMessage);
+        window.alert(`Research Canvas: ${userMessage}`);
+      } finally {
+        pendingImportRef.current = null;
+      }
+    })();
+  }, [effectiveCanvasId, loadArtifacts, mountedEditorCanvasId]);
 
   useEffect(() => {
     if (!isSidePanelMode) {
@@ -1124,32 +1216,43 @@ export function ResearchCanvasApp() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  const onTldrawMount = useCallback((editor: Editor) => {
-    editorRef.current = editor;
-    migrateLegacyYoutubeEmbedUrls(editor);
-    const gridSeededKey = `research-canvas-grid-seeded-v1-${MAIN_DOCUMENT_ID}`;
-    try {
-      if (!localStorage.getItem(gridSeededKey)) {
+  const onTldrawMount = useCallback(
+    (editor: Editor) => {
+      editorRef.current = editor;
+      setMountedEditorCanvasId(effectiveCanvasId);
+      editor.user.updateUserPreferences({ colorScheme: uiTheme });
+      migrateLegacyYoutubeEmbedUrls(editor);
+      const gridSeededKey = `research-canvas-grid-seeded-v1-${effectiveCanvasId}`;
+      try {
+        if (!localStorage.getItem(gridSeededKey)) {
+          editor.updateInstanceState({ isGridMode: true });
+          localStorage.setItem(gridSeededKey, "1");
+        }
+      } catch {
         editor.updateInstanceState({ isGridMode: true });
-        localStorage.setItem(gridSeededKey, "1");
       }
-    } catch {
-      editor.updateInstanceState({ isGridMode: true });
-    }
-  }, []);
+    },
+    [effectiveCanvasId, uiTheme],
+  );
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.user.updateUserPreferences({ colorScheme: uiTheme });
+  }, [uiTheme, effectiveCanvasId]);
 
   const handleExportBackup = useCallback(async () => {
     const editor = editorRef.current;
-    if (!editor) return;
+    if (!editor || !currentCanvas) return;
     try {
-      const backup = await buildCanvasBackup(editor);
-      const json = JSON.stringify(backup, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
+      const json = await serializeTldrawJson(editor);
+      const blob = new Blob([json], { type: "application/vnd.tldraw+json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       const date = new Date().toISOString().slice(0, 10);
+      const safeName = currentCanvas.name.replace(/[^a-zA-Z0-9-_]+/g, "_");
       link.href = url;
-      link.download = `research-canvas-backup-${date}.tldr`;
+      link.download = `research-canvas-${safeName}-${date}.tldr`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -1158,7 +1261,7 @@ export function ResearchCanvasApp() {
       console.error("Failed to export canvas backup:", error);
       window.alert("Research Canvas: Failed to export backup.");
     }
-  }, []);
+  }, [currentCanvas]);
 
   const importFromFile = useCallback(
     async (file: File) => {
@@ -1185,6 +1288,11 @@ export function ResearchCanvasApp() {
             const officialStoreSnapshot = parseOfficialTldrawFile(editor, text);
             const isWrapped = isCanvasBackup(raw);
             const isSnapshot = isTldrawSnapshot(raw);
+            const importKind: PendingImport["sourceKind"] = isWrapped
+              ? "wrapped-backup"
+              : officialStoreSnapshot
+                ? "official-tldr"
+                : "raw-snapshot";
 
             if (
               !officialStoreSnapshot &&
@@ -1198,56 +1306,82 @@ export function ResearchCanvasApp() {
               );
             }
 
-            if (isWrapped) {
-              if (
-                raw.mainDocumentId &&
-                raw.mainDocumentId !== MAIN_DOCUMENT_ID &&
-                !window.confirm(
-                  "This backup was created for a different canvas document. Apply it anyway?",
-                )
-              ) {
-                setImportStatus("Import cancelled.");
-                return;
-              }
-            }
             if (
               !window.confirm(
-                "Importing will add pages from the file to your current canvas. Continue?",
+                "Importing will create a new canvas from this file. Continue?",
               )
             ) {
               setImportStatus("Import cancelled.");
               return;
             }
             console.debug("[ResearchCanvas] import: applying data", {
+              importKind,
               officialTldrParsed: !!officialStoreSnapshot,
               isWrappedBackup: isWrapped,
               isSnapshot,
             });
-            if (officialStoreSnapshot) {
-              await applyCanvasBackup(editor, officialStoreSnapshot as any);
-            } else if (isWrapped || isSnapshot || raw?.document || raw?.store) {
-              await applyCanvasBackup(editor, raw as any);
-            } else {
+            const baseName = file.name.replace(/\.(tldr|json)$/i, "");
+            const newId = makeCanvasId();
+            const newName = nextCanvasName(canvases, `Imported - ${baseName}`);
+            const importedIsPrivate =
+              isWrapped && typeof (raw as any).isPrivate === "boolean"
+                ? !!(raw as any).isPrivate
+                : false;
+            const created: CanvasMeta = {
+              id: newId,
+              name: newName,
+              isPrivate: importedIsPrivate,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+            const nextCanvases = [...canvases, created];
+            await saveCanvases(nextCanvases);
+            await setLastOpenCanvasId(newId);
+            setCanvases(nextCanvases);
+            setCurrentCanvasId(newId);
+            let snapshotSource: unknown =
+              officialStoreSnapshot ||
+              (isWrapped || isSnapshot || raw?.document || raw?.store
+                ? raw
+                : null);
+            if (!snapshotSource) {
               throw new Error("Could not parse import file.");
             }
-            await loadArtifacts();
-            console.debug("[ResearchCanvas] import: completed");
-            setImportStatus("Import complete.");
-            window.alert(
-              "Research Canvas: Import complete. Check your page list.",
-            );
+            if (isWrapped) {
+              snapshotSource = {
+                ...(snapshotSource as any),
+                mainDocumentId: newId,
+              };
+            }
+            pendingImportRef.current = {
+              canvasId: newId,
+              snapshot: snapshotSource,
+              sourceKind: importKind,
+              applyMode: "restore",
+            };
+            console.debug("[ResearchCanvas] import: queued apply", {
+              canvasId: newId,
+              sourceKind: importKind,
+              importedIsPrivate,
+            });
+            setImportStatus("Applying import...");
           } catch (error) {
             console.error("Failed to import canvas backup:", error);
             const message =
               error instanceof Error ? error.message : "Unknown import error.";
-            setImportStatus(`Import failed: ${message}`);
-            window.alert(`Research Canvas: Import failed. ${message}`);
+            const userMessage = message.includes("not a valid")
+              ? "Import failed: file is not a valid .tldr or Research Canvas backup."
+              : message.includes("Unexpected token")
+                ? "Import failed: file is not valid JSON."
+                : `Import failed: ${message}`;
+            setImportStatus(userMessage);
+            window.alert(`Research Canvas: ${userMessage}`);
           }
         })();
       };
       reader.readAsText(file);
     },
-    [loadArtifacts],
+    [canvases, loadArtifacts],
   );
 
   const openImportPicker = useCallback(() => {
@@ -1267,6 +1401,119 @@ export function ResearchCanvasApp() {
     input.click();
   }, [importFromFile]);
 
+  const handleCreateCanvas = useCallback(async () => {
+    const id = makeCanvasId();
+    const name = nextCanvasName(canvases);
+    const now = Date.now();
+    const created: CanvasMeta = {
+      id,
+      name,
+      isPrivate: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const next = [...canvases, created];
+    setCanvases(next);
+    await saveCanvases(next);
+    await setLastOpenCanvasId(id);
+    setCurrentCanvasId(id);
+    setIsBlurredPrivate(false);
+    await loadArtifacts();
+  }, [canvases, loadArtifacts]);
+
+  const handleSelectCanvas = useCallback(
+    async (id: string) => {
+      if (id === currentCanvasId) return;
+      const nextCurrent = canvases.find((c) => c.id === id);
+      if (!nextCurrent) return;
+      setCurrentCanvasId(id);
+      await setLastOpenCanvasId(id);
+      const isPrivate = !!nextCurrent.isPrivate;
+      const unlocked = unlockedPrivateCanvasesRef.current.has(id);
+      setIsBlurredPrivate(isPrivate && !unlocked);
+      await loadArtifacts();
+    },
+    [canvases, currentCanvasId, loadArtifacts],
+  );
+
+  const handleRenameCanvas = useCallback(
+    async (id: string) => {
+      const target = canvases.find((c) => c.id === id);
+      if (!target) return;
+      const nextName = window.prompt("Rename canvas", target.name);
+      if (!nextName) return;
+      const trimmed = nextName.trim();
+      if (!trimmed || trimmed === target.name) return;
+      const updated = canvases.map((c) =>
+        c.id === id ? withUpdatedTimestamp({ ...c, name: trimmed }) : c,
+      );
+      setCanvases(updated);
+      await saveCanvases(updated);
+    },
+    [canvases],
+  );
+
+  const handleTogglePrivate = useCallback(
+    async (id: string) => {
+      const updated = canvases.map((c) =>
+        c.id === id
+          ? withUpdatedTimestamp({ ...c, isPrivate: !c.isPrivate })
+          : c,
+      );
+      setCanvases(updated);
+      await saveCanvases(updated);
+      if (currentCanvasId === id) {
+        const nowPrivate = updated.find((c) => c.id === id)?.isPrivate;
+        if (nowPrivate) {
+          const unlocked = unlockedPrivateCanvasesRef.current.has(id);
+          setIsBlurredPrivate(!unlocked);
+        } else {
+          setIsBlurredPrivate(false);
+        }
+      }
+    },
+    [canvases, currentCanvasId],
+  );
+
+  const handleDeleteCanvas = useCallback(
+    async (id: string) => {
+      if (!window.confirm("Delete this canvas? This cannot be undone.")) return;
+      const remaining = canvases.filter((c) => c.id !== id);
+      if (!remaining.length) {
+        const freshId = makeCanvasId();
+        const now = Date.now();
+        const created: CanvasMeta = {
+          id: freshId,
+          name: "Canvas 1",
+          isPrivate: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        setCanvases([created]);
+        await saveCanvases([created]);
+        await setLastOpenCanvasId(freshId);
+        setCurrentCanvasId(freshId);
+        setIsBlurredPrivate(false);
+        await loadArtifacts();
+        return;
+      }
+      setCanvases(remaining);
+      await saveCanvases(remaining);
+      if (currentCanvasId === id) {
+        const next = remaining[0];
+        setCurrentCanvasId(next.id);
+        await setLastOpenCanvasId(next.id);
+        const isPrivate = !!next.isPrivate;
+        const unlocked = unlockedPrivateCanvasesRef.current.has(next.id);
+        setIsBlurredPrivate(isPrivate && !unlocked);
+        await loadArtifacts();
+      }
+    },
+    [canvases, currentCanvasId, loadArtifacts],
+  );
+
+  const visibleCanvases = canvases;
+
   useEffect(() => {
     if (!importStatus) return;
     const timeout = window.setTimeout(() => {
@@ -1279,10 +1526,26 @@ export function ResearchCanvasApp() {
 
   return (
     <div
-      style={{ display: "flex", height: "100vh", width: "100vw" }}
+      style={{
+        display: "flex",
+        height: "100vh",
+        width: "100vw",
+        background: isDarkTheme ? "#0f172a" : "#ffffff",
+        color: isDarkTheme ? "#e5e7eb" : "#111827",
+      }}
       data-fullscreen-canvas={isFullScreenTab ? "1" : "0"}
     >
-      <main style={{ flex: 1, minHeight: 0 }}>
+      {openCanvasMenuId ? (
+        <div
+          onClick={() => setOpenCanvasMenuId(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 19,
+          }}
+        />
+      ) : null}
+      <main style={{ flex: 1, minHeight: 0, position: "relative" }}>
         {!sessionReady ? (
           <div
             style={{
@@ -1298,6 +1561,64 @@ export function ResearchCanvasApp() {
           </div>
         ) : (
           <>
+            <button
+              type="button"
+              onClick={() => {
+                void chrome.runtime.sendMessage({
+                  type: "OPEN_CANVAS_TAB",
+                } as RuntimeMessage);
+              }}
+              style={{
+                position: "absolute",
+                bottom: 80,
+                right: 6,
+                zIndex: 10000,
+                width: 24,
+                height: 24,
+                borderRadius: 999,
+                border: "none",
+                background: isDarkTheme
+                  ? "rgba(226,232,240,0.95)"
+                  : "rgba(17,24,39,0.9)",
+                color: isDarkTheme ? "#111827" : "white",
+                fontSize: 12,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              title="Open full-screen board"
+            >
+              ⛶
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSidebar((v) => !v)}
+              style={{
+                position: "absolute",
+                bottom: 50,
+                right: 6,
+                zIndex: 10000,
+                width: 24,
+                height: 24,
+                borderRadius: 999,
+                border: "none",
+                background: isDarkTheme
+                  ? "rgba(226,232,240,0.95)"
+                  : "rgba(17,24,39,0.9)",
+                color: isDarkTheme ? "#111827" : "white",
+                fontSize: 14,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              title={
+                showSidebar ? "Hide boards sidebar" : "Show boards sidebar"
+              }
+            >
+              {showSidebar ? "⟨⟨" : "⟩⟩"}
+            </button>
             {importStatus ? (
               <div
                 onClick={() => setImportStatus("")}
@@ -1319,32 +1640,408 @@ export function ResearchCanvasApp() {
               </div>
             ) : null}
             <Tldraw
-              persistenceKey={`canvas-v2-${MAIN_DOCUMENT_ID}`}
+              persistenceKey={`canvas-v2-${effectiveCanvasId}`}
               embeds={RESEARCH_EMBED_DEFINITIONS}
               shapeUtils={RESEARCH_SHAPE_UTILS}
               onMount={onTldrawMount}
-              components={{
-                ImageToolbar: ImageToolbarWithUrl,
-                VideoToolbar: VideoToolbarWithUrl,
-                MainMenu: () => (
-                  <BackupMainMenu
-                    onExport={handleExportBackup}
-                    onImportClick={openImportPicker}
-                  />
-                ),
-              }}
+              components={TLDRAW_COMPONENTS}
             >
               <CanvasScene
                 artifacts={artifacts}
+                canvasId={effectiveCanvasId}
                 onArtifactsChanged={() => {
                   void loadArtifacts();
                 }}
               />
               <CaptureSourceContextToolbar />
             </Tldraw>
+            {currentCanvas?.isPrivate && isBlurredPrivate ? (
+              <>
+                <div
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    const now = Date.now();
+                    const last = (window as any).__researchCanvasLastRightClickAt as
+                      | number
+                      | undefined;
+                    (window as any).__researchCanvasLastRightClickAt = now;
+                    if (last && now - last < 650 && currentCanvas) {
+                      unlockedPrivateCanvasesRef.current.add(currentCanvas.id);
+                      setIsBlurredPrivate(false);
+                      (window as any).__researchCanvasLastRightClickAt = undefined;
+                    }
+                  }}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    backdropFilter: "blur(50px)",
+                    backgroundColor: "rgba(15,23,42,0.7)",
+                    pointerEvents: "auto",
+                    zIndex: 40,
+                  }}
+                />
+              </>
+            ) : null}
           </>
         )}
       </main>
+      {showSidebar ? (
+        <aside
+          style={{
+            width: 220,
+            borderLeft: isDarkTheme ? "2px solid #353341" : "2px solid #E8E9EA",
+            background: isDarkTheme ? "#202125" : "#EDF0F2",
+            color: isDarkTheme ? "#e5e7eb" : "#111827",
+            padding: 8,
+            boxSizing: "border-box",
+            fontFamily: "system-ui, sans-serif",
+            fontSize: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 4,
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>Boards</span>
+            <button
+              type="button"
+              onClick={handleCreateCanvas}
+              style={{
+                border: isDarkTheme
+                  ? "1px solid rgba(148,163,184,0.5)"
+                  : "1px solid rgba(0,0,0,0.15)",
+                background: "transparent",
+                color: "inherit",
+                borderRadius: 6,
+                padding: "2px 6px",
+                cursor: "pointer",
+                fontSize: 20,
+              }}
+            >
+              +
+            </button>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+            }}
+          >
+            {visibleCanvases.map((canvas) => {
+              const isCurrent = canvas.id === currentCanvasId;
+              return (
+                <div
+                  key={canvas.id}
+                  style={{
+                    padding: "6px 6px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    background: isCurrent
+                      ? isDarkTheme
+                        ? "rgba(148,163,184,0.2)"
+                        : "rgba(17,24,39,0.08)"
+                      : "transparent",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 4,
+                  }}
+                  onClick={() => handleSelectCanvas(canvas.id)}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span
+                      title={canvas.name}
+                      style={{
+                        whiteSpace: "nowrap",
+                        textOverflow: "ellipsis",
+                        overflow: "hidden",
+                      }}
+                    >
+                      {canvas.name}
+                    </span>
+                    {canvas.isPrivate ? (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          opacity: 0.7,
+                        }}
+                      >
+                        Locked
+                      </span>
+                    ) : null}
+                  </div>
+                  <div
+                    style={{
+                      position: "relative",
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      title="More actions"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenCanvasMenuId((prev) =>
+                          prev === canvas.id ? null : canvas.id,
+                        );
+                      }}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        cursor: "pointer",
+                        fontSize: 18,
+                        padding: 0,
+                        lineHeight: 1,
+                      }}
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        xmlns="http://www.w3.org/2000/svg"
+                      >
+                        <path
+                          d="M12 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM12 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM10 18a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z"
+                          fill={isDarkTheme ? "#FFFFFF" : "#000000"}
+                        />
+                      </svg>
+                    </button>
+                    {openCanvasMenuId === canvas.id ? (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                          position: "absolute",
+                          top: "110%",
+                          right: 0,
+                          minWidth: 140,
+                          background: "#111827",
+                          color: "white",
+                          borderRadius: 6,
+                          boxShadow:
+                            "0 10px 15px -3px rgba(0,0,0,0.3), 0 4px 6px -4px rgba(0,0,0,0.3)",
+                          padding: 4,
+                          zIndex: 20,
+                          fontSize: 11,
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenCanvasMenuId(null);
+                            void handleRenameCanvas(canvas.id);
+                          }}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "6px 10px",
+                            border: "none",
+                            background: "transparent",
+                            color: "inherit",
+                            cursor: "pointer",
+                            borderRadius: 4,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(249,250,251,0.1)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                          }}
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenCanvasMenuId(null);
+                            void handleTogglePrivate(canvas.id);
+                          }}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "6px 10px",
+                            border: "none",
+                            background: "transparent",
+                            color: "inherit",
+                            cursor: "pointer",
+                            borderRadius: 4,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(249,250,251,0.1)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                          }}
+                        >
+                          {canvas.isPrivate ? "Unlock board" : "Lock board"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenCanvasMenuId(null);
+                            void handleExportBackup();
+                          }}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "6px 10px",
+                            border: "none",
+                            background: "transparent",
+                            color: "inherit",
+                            cursor: "pointer",
+                            borderRadius: 4,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(249,250,251,0.1)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                          }}
+                        >
+                          Export backup
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenCanvasMenuId(null);
+                            void handleDeleteCanvas(canvas.id);
+                          }}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "6px 10px",
+                            border: "none",
+                            background: "transparent",
+                            color: "#fca5a5",
+                            cursor: "pointer",
+                            borderRadius: 4,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(248,113,113,0.18)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div
+            style={{
+              marginTop: 8,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <button
+              type="button"
+              onClick={openImportPicker}
+              style={{
+                flex: 1,
+                borderRadius: 6,
+                border: isDarkTheme
+                  ? "1px solid rgba(148,163,184,0.5)"
+                  : "1px solid rgba(17,24,39,0.2)",
+                padding: "4px 6px",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+              }}
+            >
+              Import .tldr
+            </button>
+            <button
+              type="button"
+              title={
+                isDarkTheme ? "Switch to light theme" : "Switch to dark theme"
+              }
+              aria-label={
+                isDarkTheme ? "Switch to light theme" : "Switch to dark theme"
+              }
+              onClick={() =>
+                setUiTheme((prev) => (prev === "dark" ? "light" : "dark"))
+              }
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                border: isDarkTheme
+                  ? "1px solid rgba(148,163,184,0.5)"
+                  : "1px solid rgba(17,24,39,0.2)",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                display: "grid",
+                placeItems: "center",
+              }}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+              >
+                {isDarkTheme ? (
+                  <path
+                    d="M12 4V2M12 22v-2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4 12H2M22 12h-2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ) : (
+                  <path
+                    d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                )}
+              </svg>
+            </button>
+          </div>
+        </aside>
+      ) : null}
     </div>
   );
 }

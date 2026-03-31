@@ -61,6 +61,7 @@ export interface PendingCaptureRequest {
   sourceUrl: string;
   mediaType?: "image" | "video";
   mediaUrl?: string;
+  canvasId?: string;
 }
 
 export type RuntimeMessage =
@@ -85,16 +86,18 @@ export type RuntimeMessage =
   | {
       type: "SET_ARTIFACT_CANVAS_POSITION";
       artifactId: string;
+      canvasId: string;
       canvasX: number;
       canvasY: number;
     }
-  | { type: "LIST_ARTIFACTS" }
+  | { type: "LIST_ARTIFACTS"; canvasId: string }
   | {
       type: "APPLY_CANVAS_BACKUP";
       backup: {
         version: 1;
         mainDocumentId: string;
         createdAt: number;
+        isPrivate?: boolean;
         tldrawSnapshot: unknown;
         artifacts: ArtifactRecord[];
         deletedArtifactIds: string[];
@@ -121,6 +124,10 @@ export type RuntimeMessage =
   | { type: "CAPTURE_ERROR"; requestId: string; message: string }
   | { type: "OPEN_CANVAS"; artifactId?: string }
   | { type: "OPEN_CANVAS_TAB" }
+  | { type: "OPEN_BOARD_SIDEBAR"; tabId: number }
+  | { type: "SET_FLOATING_TOOLBAR_VISIBILITY"; visible: boolean }
+  | { type: "SET_FLOATING_TOOLBAR_FOR_TAB"; tabId: number; visible: boolean }
+  | { type: "GET_FLOATING_TOOLBAR_FOR_TAB"; tabId: number }
   /**
    * Full-screen canvas tab became active (tab switch or focus) — background should close any live
    * side panel instance so the floating toolbar toggle semantics stay consistent.

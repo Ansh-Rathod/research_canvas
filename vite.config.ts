@@ -61,6 +61,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        popup: resolve(rootDir, "src/popup/index.html"),
         sidepanel: resolve(rootDir, "src/sidepanel/index.html"),
         canvasTab: resolve(rootDir, "src/tldraw/index.html"),
         background: resolve(rootDir, "src/background/service-worker.ts"),

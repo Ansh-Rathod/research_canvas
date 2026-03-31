@@ -10,6 +10,8 @@ export type CanvasBackupV1 = {
   version: CanvasBackupVersion;
   mainDocumentId: string;
   createdAt: number;
+  /** Canvas privacy state at export time (optional for backward compatibility). */
+  isPrivate?: boolean;
   /** Full tldraw editor snapshot (document + session) for this canvas. */
   tldrawSnapshot: unknown;
   /** Artifacts for this canvas with any blob-backed media resolved to data URLs. */
@@ -38,8 +40,10 @@ export function isCanvasBackup(input: unknown): input is CanvasBackup {
   if (obj.version !== 1) return false;
   if (typeof obj.mainDocumentId !== "string") return false;
   if (typeof obj.createdAt !== "number") return false;
+  if (obj.isPrivate != null && typeof obj.isPrivate !== "boolean") return false;
   if (!Array.isArray(obj.artifacts)) return false;
   if (!Array.isArray(obj.deletedArtifactIds)) return false;
+  if (!toStoreSnapshotLike(obj.tldrawSnapshot)) return false;
   return true;
 }
 
@@ -79,17 +83,27 @@ function getPageNamesFromSnapshot(snapshot: TldrawLikeSnapshot): Set<string> {
   return names;
 }
 
-const IMPORTABLE_RECORD_TYPES = new Set(["page", "shape", "asset", "binding"]);
-
 function filterImportableStore(store: Record<string, any>): Record<string, any> {
   const next: Record<string, any> = {};
   for (const [id, record] of Object.entries(store)) {
     if (!record || typeof record !== "object") continue;
     const typeName = String((record as any).typeName ?? "");
-    if (!IMPORTABLE_RECORD_TYPES.has(typeName)) continue;
+    // Keep all record types except the root document record so camera,
+    // instance-page state, and similar metadata survive round-trip import.
+    if (!typeName || typeName === "document") continue;
     next[id] = record;
   }
   return next;
+}
+
+function getStoreTypeCounts(store: Record<string, any>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const record of Object.values(store)) {
+    if (!record || typeof record !== "object") continue;
+    const typeName = String((record as any).typeName ?? "unknown");
+    counts[typeName] = (counts[typeName] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function makeUniqueId(base: string, used: Set<string>): string {
@@ -201,9 +215,12 @@ export function parseOfficialTldrawFile(
   }
 }
 
-async function getArtifactsForBackup(): Promise<ArtifactRecord[]> {
+async function getArtifactsForBackup(
+  canvasId: string,
+): Promise<ArtifactRecord[]> {
   const msg = (await chrome.runtime.sendMessage({
     type: "LIST_ARTIFACTS",
+    canvasId,
   } as RuntimeMessage)) as { ok?: boolean; artifacts?: ArtifactRecord[] };
   if (!msg?.ok || !msg.artifacts) {
     return [];
@@ -211,14 +228,16 @@ async function getArtifactsForBackup(): Promise<ArtifactRecord[]> {
   return msg.artifacts;
 }
 
-async function getDeletedArtifactIdsForBackup(): Promise<string[]> {
+async function getDeletedArtifactIdsForBackup(
+  canvasId: string,
+): Promise<string[]> {
   try {
     const res = await chrome.storage.local.get("deletedArtifactIdsByCanvas");
     const all = (res.deletedArtifactIdsByCanvas ?? {}) as Record<
       string,
       string[]
     >;
-    return all[MAIN_DOCUMENT_ID] ?? [];
+    return all[canvasId] ?? [];
   } catch {
     return [];
   }
@@ -226,16 +245,19 @@ async function getDeletedArtifactIdsForBackup(): Promise<string[]> {
 
 export async function buildCanvasBackup(
   editor: Editor,
+  canvasId: string,
+  options?: { isPrivate?: boolean },
 ): Promise<CanvasBackup> {
   const snapshot = getSnapshot(editor.store);
   const [artifacts, deletedArtifactIds] = await Promise.all([
-    getArtifactsForBackup(),
-    getDeletedArtifactIdsForBackup(),
+    getArtifactsForBackup(canvasId),
+    getDeletedArtifactIdsForBackup(canvasId),
   ]);
   const backup: CanvasBackupV1 = {
     version: 1,
-    mainDocumentId: MAIN_DOCUMENT_ID,
+    mainDocumentId: canvasId,
     createdAt: Date.now(),
+    isPrivate: !!options?.isPrivate,
     tldrawSnapshot: snapshot,
     artifacts,
     deletedArtifactIds,
@@ -246,9 +268,11 @@ export async function buildCanvasBackup(
 export async function applyCanvasBackup(
   editor: Editor,
   backupOrSnapshot: CanvasBackup | TldrawLikeSnapshot | StoreSnapshotLike,
+  options?: { mode?: "merge" | "restore" },
 ): Promise<void> {
   console.debug("[ResearchCanvas] applyCanvasBackup: start", {
     isWrappedBackup: isCanvasBackup(backupOrSnapshot),
+    mode: options?.mode ?? "merge",
   });
   if (isCanvasBackup(backupOrSnapshot)) {
     // For extension-generated backups, treat them as a full restore of the
@@ -260,8 +284,15 @@ export async function applyCanvasBackup(
         "Backup file did not contain a readable tldraw snapshot.",
       );
     }
+    const recordCount = Object.keys(incoming.store ?? {}).length;
+    if (!recordCount) {
+      throw new Error(
+        "Backup file snapshot was empty. Export may have failed before data was written.",
+      );
+    }
     console.debug("[ResearchCanvas] applyCanvasBackup: restore backup", {
-      records: Object.keys(incoming.store ?? {}).length,
+      records: recordCount,
+      recordTypes: getStoreTypeCounts(incoming.store ?? {}),
     });
     editor.loadSnapshot(incoming as any);
     console.debug(
@@ -295,7 +326,17 @@ export async function applyCanvasBackup(
     incomingImportableRecords: Object.keys(
       filterImportableStore(incoming.store ?? {}),
     ).length,
+    incomingRecordTypes: getStoreTypeCounts(incoming.store ?? {}),
   });
+  if ((options?.mode ?? "merge") === "restore") {
+    if (!Object.keys(incoming.store ?? {}).length) {
+      throw new Error(
+        "Import snapshot was empty. File is valid JSON but does not contain drawing data.",
+      );
+    }
+    editor.loadSnapshot(incoming as any);
+    return;
+  }
   const merged = addPagesWithUniqueNames(current, incoming);
   editor.loadSnapshot(merged as any);
 }
