@@ -372,6 +372,48 @@ chrome.runtime.onMessage.addListener(
         return;
       }
 
+      if (message.type === "OPEN_CANVAS_TAB") {
+        const url = chrome.runtime.getURL("src/tldraw/index.html?fullscreen=1");
+        await chrome.tabs.create({ url });
+
+        const panelSeemsLive =
+          lastSidePanelHeartbeatAtMs > 0 &&
+          Date.now() - lastSidePanelHeartbeatAtMs < 12000;
+        if (panelSeemsLive) {
+          try {
+            await chrome.runtime.sendMessage({
+              type: "CLOSE_SIDE_PANEL",
+            } as RuntimeMessage);
+          } catch {
+            /* side panel not listening */
+          }
+          await chrome.storage.local.remove("sidePanelHeartbeatAt");
+          lastSidePanelHeartbeatAtMs = 0;
+        }
+
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "FULLSCREEN_CANVAS_ACTIVE") {
+        const panelSeemsLive =
+          lastSidePanelHeartbeatAtMs > 0 &&
+          Date.now() - lastSidePanelHeartbeatAtMs < 12000;
+        if (panelSeemsLive) {
+          try {
+            await chrome.runtime.sendMessage({
+              type: "CLOSE_SIDE_PANEL",
+            } as RuntimeMessage);
+          } catch {
+            /* side panel not listening */
+          }
+          await chrome.storage.local.remove("sidePanelHeartbeatAt");
+          lastSidePanelHeartbeatAtMs = 0;
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (message.type === "REQUEST_CAPTURE_VISIBLE_TAB" && sender.tab?.id) {
         const dataUrl = await captureVisibleTab(sender.tab.id);
         sendResponse({ ok: true, dataUrl });

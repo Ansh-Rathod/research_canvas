@@ -8,6 +8,11 @@ iframe.tl-embed {
   pointer-events: auto !important;
 }
 
+/* Hide tldraw side panel in full-screen canvas tab (opened from floating toolbar). */
+[data-fullscreen-canvas="1"] .tlui-layout__left {
+  display: none !important;
+}
+
 /* Center play affordance for captured / local videos (research video shape util). */
 .research-video-play-overlay {
   position: absolute;

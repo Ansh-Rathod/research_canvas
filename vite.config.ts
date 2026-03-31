@@ -62,6 +62,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         sidepanel: resolve(rootDir, "src/sidepanel/index.html"),
+        canvasTab: resolve(rootDir, "src/tldraw/index.html"),
         background: resolve(rootDir, "src/background/service-worker.ts"),
         content: resolve(rootDir, "src/content/content-script.ts")
       },

@@ -84,6 +84,7 @@ type RectPickResult = {
  */
 const CAPTURE_RECT_INSET_PX = 6;
 const CAPTURE_RECORDING_BLEED_GUARD_PX = 1;
+const RECORDING_OUTLINE_GAP_PX = 2;
 
 type RectLike = { x: number; y: number; width: number; height: number };
 
@@ -148,6 +149,7 @@ function showRecordingRegionOutline(rect: Rect): () => void {
   const y = rect.y;
   const w = rect.width;
   const h = rect.height;
+  const g = RECORDING_OUTLINE_GAP_PX;
 
   const styleBar = (el: HTMLDivElement) => {
     el.setAttribute("data-research-canvas-recording-outline", "");
@@ -160,37 +162,37 @@ function showRecordingRegionOutline(rect: Rect): () => void {
   const top = document.createElement("div");
   styleBar(top);
   Object.assign(top.style, {
-    left: `${x}px`,
-    top: `${y - b}px`,
-    width: `${w}px`,
+    left: `${x - b - g}px`,
+    top: `${y - b - g}px`,
+    width: `${w + 2 * (b + g)}px`,
     height: `${b}px`,
   });
 
   const bottom = document.createElement("div");
   styleBar(bottom);
   Object.assign(bottom.style, {
-    left: `${x}px`,
-    top: `${y + h}px`,
-    width: `${w}px`,
+    left: `${x - b - g}px`,
+    top: `${y + h + g}px`,
+    width: `${w + 2 * (b + g)}px`,
     height: `${b}px`,
   });
 
   const left = document.createElement("div");
   styleBar(left);
   Object.assign(left.style, {
-    left: `${x - b}px`,
-    top: `${y}px`,
+    left: `${x - b - g}px`,
+    top: `${y - b - g}px`,
     width: `${b}px`,
-    height: `${h}px`,
+    height: `${h + 2 * (b + g)}px`,
   });
 
   const right = document.createElement("div");
   styleBar(right);
   Object.assign(right.style, {
-    left: `${x + w}px`,
-    top: `${y}px`,
+    left: `${x + w + g}px`,
+    top: `${y - b - g}px`,
     width: `${b}px`,
-    height: `${h}px`,
+    height: `${h + 2 * (b + g)}px`,
   });
 
   for (const el of [top, bottom, left, right]) {

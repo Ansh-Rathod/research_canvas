@@ -9,7 +9,6 @@ import {
   DefaultVideoToolbarContent,
   renderPlaintextFromRichText,
   Tldraw,
-  TldrawUiButton,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
   TldrawUiToolbarButton,
@@ -958,6 +957,16 @@ export function ResearchCanvasApp() {
   const loadArtifactsSeq = useRef(0);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
 
+  const isFullScreenTab = (() => {
+    try {
+      const url = new URL(window.location.href);
+      return url.searchParams.get("fullscreen") === "1";
+    } catch {
+      return false;
+    }
+  })();
+  const isSidePanelMode = !isFullScreenTab;
+
   const loadArtifacts = useCallback(async () => {
     const seq = (loadArtifactsSeq.current += 1);
     const base = await listArtifacts();
@@ -992,6 +1001,10 @@ export function ResearchCanvasApp() {
   }, [loadArtifacts]);
 
   useEffect(() => {
+    if (!isSidePanelMode) {
+      return;
+    }
+
     const heartbeat = () => {
       const now = Date.now();
       void chrome.storage.local.set({ sidePanelHeartbeatAt: now });
@@ -1024,9 +1037,40 @@ export function ResearchCanvasApp() {
   }, []);
 
   useEffect(() => {
+    if (!isFullScreenTab) {
+      return;
+    }
+
+    const notifyActive = () => {
+      void chrome.runtime.sendMessage({
+        type: "FULLSCREEN_CANVAS_ACTIVE",
+      } as RuntimeMessage);
+    };
+
+    notifyActive();
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        notifyActive();
+      }
+    };
+    const onFocus = () => notifyActive();
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [isFullScreenTab]);
+
+  useEffect(() => {
     const listener = (msg: RuntimeMessage) => {
       if (msg.type === "CLOSE_SIDE_PANEL") {
-        window.close();
+        if (isSidePanelMode) {
+          window.close();
+        }
         return;
       }
       if (msg.type === "OPEN_CANVAS") {
@@ -1053,7 +1097,10 @@ export function ResearchCanvasApp() {
   const muted = "#555555";
 
   return (
-    <div style={{ display: "flex", height: "100vh", width: "100vw" }}>
+    <div
+      style={{ display: "flex", height: "100vh", width: "100vw" }}
+      data-fullscreen-canvas={isFullScreenTab ? "1" : "0"}
+    >
       <main style={{ flex: 1, minHeight: 0 }}>
         {!sessionReady ? (
           <div

@@ -108,7 +108,13 @@ export type RuntimeMessage =
   | { type: "REQUEST_ELEMENT_RECORDING"; streamId: string }
   | { type: "CAPTURE_RESULT"; requestId: string; artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt"> }
   | { type: "CAPTURE_ERROR"; requestId: string; message: string }
-  | { type: "OPEN_CANVAS"; artifactId?: string };
+  | { type: "OPEN_CANVAS"; artifactId?: string }
+  | { type: "OPEN_CANVAS_TAB" }
+  /**
+   * Full-screen canvas tab became active (tab switch or focus) — background should close any live
+   * side panel instance so the floating toolbar toggle semantics stay consistent.
+   */
+  | { type: "FULLSCREEN_CANVAS_ACTIVE" };
 
 export const CONTEXT_MENU_IDS: Record<CaptureAction, string> = {
   "capture-selected-text-heading":
