@@ -1,6 +1,6 @@
+import { MAIN_DOCUMENT_ID } from "@shared/document";
 import { type ArtifactRecord, type RuntimeMessage } from "@shared/messages";
 import type { CanvasMeta } from "@storage/canvases";
-import { MAIN_DOCUMENT_ID } from "@shared/document";
 import {
   getLastOpenCanvasId,
   loadCanvases,
@@ -10,7 +10,7 @@ import {
   setLastOpenCanvasId,
   withUpdatedTimestamp,
 } from "@storage/canvases";
-import { listArtifacts, readBlobAsDataUrl } from "@storage/repositories";
+import { listArtifacts } from "@storage/repositories";
 import { mergeDeletedArtifactTombstones } from "@storage/tombstones";
 import type { Editor } from "@tldraw/editor";
 import {
@@ -20,7 +20,6 @@ import {
   DefaultMainMenuContent,
   DefaultVideoToolbarContent,
   renderPlaintextFromRichText,
-  serializeTldrawJson,
   Tldraw,
   TldrawUiButtonIcon,
   TldrawUiContextualToolbar,
@@ -30,14 +29,17 @@ import {
   useValue,
 } from "@tldraw/tldraw";
 import "@tldraw/tldraw/tldraw.css";
+import type { TLAssetStore } from "@tldraw/tlschema";
 import type { TLRichText } from "@tldraw/tlschema";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { uploadMediaToLocalServer } from "@shared/localMediaUpload";
 import {
   applyCanvasBackup,
   isCanvasBackup,
   isTldrawSnapshot,
   parseOfficialTldrawFile,
 } from "./backup";
+import { serializeTldrawJsonUrlOnly } from "./serializeTldrawJsonUrlOnly";
 import "./embed-interactive.css";
 import { ResearchEmbedShapeUtil } from "./researchEmbedShapeUtil";
 import {
@@ -441,13 +443,15 @@ function CanvasScene({
 
         return;
       }
-      if (artifact.type === "image" && artifact.dataUrl) {
+      if (artifact.type === "image") {
         const primaryId = String(toShapeId(artifact.id));
         const existing = editor.getShape(primaryId as any);
         if (existing) {
           renderedArtifactIdsRef.current.add(artifact.id);
           return;
         }
+        const src = sanitizeAssetSrc(artifact.mediaUrl || artifact.sourceUrl);
+        if (!src) return;
         const assetId = toAssetId(`${artifact.id}_asset`);
         editor.createAssets([
           {
@@ -455,7 +459,7 @@ function CanvasScene({
             type: "image",
             typeName: "asset",
             props: {
-              src: artifact.dataUrl,
+              src,
               w: artifact.width ?? 420,
               h: artifact.height ?? 260,
               name: artifact.title,
@@ -490,7 +494,7 @@ function CanvasScene({
       if (artifact.type === "video") {
         const primaryId = String(toShapeId(artifact.id));
         const existing = editor.getShape(primaryId as any);
-        const src = artifact.dataUrl ?? artifact.sourceUrl;
+        const src = sanitizeAssetSrc(artifact.mediaUrl || artifact.sourceUrl);
         if (existing) {
           if (existing.type === "video") {
             const prevRev = Number(
@@ -1017,6 +1021,233 @@ type PendingImport = {
   applyMode: "merge" | "restore";
 };
 
+type UploadStatusItem = Extract<RuntimeMessage, { type: "UPLOAD_STATUS" }>;
+
+const LOCAL_MEDIA_SERVER_BASE =
+  (globalThis as any).__RESEARCH_CANVAS_LOCAL_MEDIA_SERVER__ ||
+  "http://127.0.0.1:43123";
+
+function normalizeLocalMediaUrl(url: string | undefined): string | undefined {
+  if (!url) return url;
+  return url
+    .replace("/media/image/", "/media/images/")
+    .replace("/media/video/", "/media/videos/");
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function toPortableMediaUrl(url: string | undefined): string | undefined {
+  if (!url) return url;
+  const normalized = normalizeLocalMediaUrl(url) ?? url;
+  if (normalized.startsWith("/media/images/") || normalized.startsWith("/media/videos/")) {
+    return normalized;
+  }
+  if (!isHttpUrl(normalized)) return normalized;
+  try {
+    const parsed = new URL(normalized);
+    const path = parsed.pathname;
+    if (path.startsWith("/media/images/") || path.startsWith("/media/videos/")) {
+      return path;
+    }
+  } catch {
+    return normalized;
+  }
+  return normalized;
+}
+
+function toRenderableMediaUrl(url: string | undefined): string | undefined {
+  if (!url) return url;
+  const normalized = normalizeLocalMediaUrl(url) ?? url;
+  if (isHttpUrl(normalized)) return normalized;
+  if (normalized.startsWith("/media/images/") || normalized.startsWith("/media/videos/")) {
+    return `${LOCAL_MEDIA_SERVER_BASE}${normalized}`;
+  }
+  return normalized;
+}
+
+function sanitizeAssetSrc(url: string | undefined): string | undefined {
+  if (!url) return url;
+  const normalized = normalizeLocalMediaUrl(url) ?? url;
+  return toRenderableMediaUrl(normalized) ?? normalized;
+}
+
+const URL_BACKED_ASSET_STORE: TLAssetStore = {
+  async upload(asset, file) {
+    const assetSrc =
+      typeof (asset as { props?: { src?: unknown } }).props?.src === "string"
+        ? String((asset as { props?: { src?: unknown } }).props?.src ?? "")
+        : "";
+    const cleanedSrc = sanitizeAssetSrc(assetSrc);
+    if (cleanedSrc && isHttpUrl(cleanedSrc)) {
+      return { src: cleanedSrc };
+    }
+
+    const kind =
+      asset.type === "image" || file.type.toLowerCase().startsWith("image/")
+        ? "image"
+        : asset.type === "video" || file.type.toLowerCase().startsWith("video/")
+          ? "video"
+          : null;
+    if (!kind) {
+      throw new Error(`Unsupported asset type for upload: ${asset.type}`);
+    }
+
+    const uploaded = await uploadMediaToLocalServer({
+      kind,
+      blob: file,
+      fileName: file.name || undefined,
+      width:
+        typeof (asset as { props?: { w?: unknown } }).props?.w === "number"
+          ? Number((asset as { props?: { w?: unknown } }).props?.w)
+          : undefined,
+      height:
+        typeof (asset as { props?: { h?: unknown } }).props?.h === "number"
+          ? Number((asset as { props?: { h?: unknown } }).props?.h)
+          : undefined,
+    });
+    return { src: sanitizeAssetSrc(uploaded.url) ?? uploaded.url };
+  },
+  resolve(asset) {
+    const src =
+      typeof (asset as { props?: { src?: unknown } }).props?.src === "string"
+        ? String((asset as { props?: { src?: unknown } }).props?.src ?? "")
+        : "";
+    return sanitizeAssetSrc(src) ?? src;
+  },
+};
+
+function getMediaKindFromUrl(url: string): "image" | "video" | null {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    if (/\.(png|jpg|jpeg|gif|webp|bmp|svg)$/.test(path)) return "image";
+    if (/\.(mp4|webm|mov|m4v|ogg|ogv)$/.test(path)) return "video";
+    if (path.includes("/media/images/")) return "image";
+    if (path.includes("/media/videos/")) return "video";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function getDropPoint(
+  editor: Editor,
+  point?: { x: number; y: number },
+): { x: number; y: number } {
+  if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+    return { x: point.x, y: point.y };
+  }
+  const vp = editor.getViewportPageBounds();
+  return { x: vp.midX - 160, y: vp.midY - 110 };
+}
+
+function createUrlBackedMediaShape(
+  editor: Editor,
+  mediaUrl: string,
+  point?: { x: number; y: number },
+): boolean {
+  const mediaKind = getMediaKindFromUrl(mediaUrl);
+  if (!mediaKind) return false;
+  const p = getDropPoint(editor, point);
+  if (mediaKind === "image") {
+    const assetId = toAssetId(
+      `external_img_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    );
+    editor.createAssets([
+      {
+        id: assetId,
+        type: "image",
+        typeName: "asset",
+        props: {
+          src: mediaUrl,
+          w: 420,
+          h: 260,
+          name: "Image URL",
+          isAnimated: false,
+          mimeType: "image/*",
+        },
+        meta: {},
+      },
+    ]);
+    editor.createShape({
+      id: toShapeId(
+        `external_img_shape_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      ),
+      type: "image",
+      x: p.x,
+      y: p.y,
+      props: { assetId, w: 420, h: 260 },
+      meta: { sourceUrl: mediaUrl },
+    });
+    return true;
+  }
+
+  const assetId = toAssetId(
+    `external_vid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+  );
+  editor.createAssets([
+    {
+      id: assetId,
+      type: "video",
+      typeName: "asset",
+      props: {
+        src: mediaUrl,
+        w: 480,
+        h: 270,
+        name: "Video URL",
+        isAnimated: true,
+        mimeType: "video/*",
+      },
+      meta: {},
+    },
+  ]);
+  editor.createShape({
+    id: toShapeId(
+      `external_vid_shape_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    ),
+    type: "video",
+    x: p.x,
+    y: p.y,
+    props: {
+      w: 480,
+      h: 270,
+      assetId,
+      time: 0,
+      playing: false,
+      autoplay: false,
+      url: "",
+      altText: "Video URL",
+    },
+    meta: { sourceUrl: mediaUrl },
+  });
+  return true;
+}
+
+function hydrateImportedLocalMediaUrls(snapshotSource: unknown): unknown {
+  if (!snapshotSource || typeof snapshotSource !== "object") return snapshotSource;
+  const root = snapshotSource as any;
+  const store = root?.document?.store ?? root?.store;
+  if (!store || typeof store !== "object") return snapshotSource;
+  for (const record of Object.values(store as Record<string, any>)) {
+    if (!record || typeof record !== "object") continue;
+    if ((record as any).typeName !== "asset") continue;
+    const assetType = String((record as any).type ?? "");
+    if (assetType !== "image" && assetType !== "video") continue;
+    const props = (record as any).props;
+    const src = String(props?.src ?? "");
+    if (!src) continue;
+    const hydrated = toRenderableMediaUrl(src);
+    if (!hydrated || hydrated === src) continue;
+    (record as any).props = {
+      ...props,
+      src: hydrated,
+    };
+  }
+  return snapshotSource;
+}
+
 export function ResearchCanvasApp() {
   const [canvases, setCanvases] = useState<CanvasMeta[]>([]);
   const [currentCanvasId, setCurrentCanvasId] = useState<string | null>(null);
@@ -1027,6 +1258,9 @@ export function ResearchCanvasApp() {
   const [uiTheme, setUiTheme] = useState<"light" | "dark">("light");
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const [sessionReady, setSessionReady] = useState(false);
+  const [uploadStatuses, setUploadStatuses] = useState<UploadStatusItem[]>([]);
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [uploadToast, setUploadToast] = useState("");
   const [mountedEditorCanvasId, setMountedEditorCanvasId] = useState<
     string | null
   >(null);
@@ -1049,6 +1283,9 @@ export function ResearchCanvasApp() {
   const currentCanvas = canvases.find((c) => c.id === currentCanvasId) ?? null;
   const effectiveCanvasId = currentCanvas?.id ?? "main";
   const isDarkTheme = uiTheme === "dark";
+  const activeUploads = uploadStatuses.filter(
+    (row) => row.status === "queued" || row.status === "uploading",
+  ).length;
 
   useEffect(() => {
     activeCanvasIdRef.current = effectiveCanvasId;
@@ -1073,19 +1310,9 @@ export function ResearchCanvasApp() {
     const canvasIdToLoad = targetCanvasId ?? activeCanvasIdRef.current;
     const seq = (loadArtifactsSeq.current += 1);
     const base = await listArtifacts();
-    const withData: ArtifactRecord[] = await Promise.all(
-      base.map(async (row) => {
-        if (row.dataUrl) return row;
-        if (row.blobId) {
-          const dataUrl = await readBlobAsDataUrl(row.blobId);
-          return { ...row, dataUrl: dataUrl ?? undefined };
-        }
-        return row;
-      }),
-    );
     if (seq !== loadArtifactsSeq.current) return;
     if (canvasIdToLoad !== activeCanvasIdRef.current) return;
-    setArtifacts(withData.filter((row) => row.canvasId === canvasIdToLoad));
+    setArtifacts(base.filter((row) => row.canvasId === canvasIdToLoad));
   }, []);
 
   loadArtifactsRef.current = () => loadArtifacts(activeCanvasIdRef.current);
@@ -1231,10 +1458,35 @@ export function ResearchCanvasApp() {
       }
       if (msg.type === "OPEN_CANVAS") {
         void loadArtifactsRef.current();
+        return;
+      }
+      if (msg.type === "UPLOAD_STATUS") {
+        setUploadStatuses((prev) => {
+          const next = prev.filter((row) => row.uploadId !== msg.uploadId);
+          next.unshift(msg);
+          return next.slice(0, 25);
+        });
+        if (msg.status === "queued" || msg.status === "uploading") {
+          setUploadToast(`Uploading ${msg.kind}: ${msg.artifactTitle}`);
+        } else if (msg.status === "success") {
+          setUploadToast(`Uploaded: ${msg.artifactTitle}`);
+        } else if (msg.status === "error") {
+          setUploadToast(`Upload failed: ${msg.artifactTitle}`);
+        }
       }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
+  }, []);
+
+  useEffect(() => {
+    void chrome.runtime
+      .sendMessage({ type: "LIST_UPLOADS" } as RuntimeMessage)
+      .then((response: { ok?: boolean; uploads?: UploadStatusItem[] }) => {
+        if (!response?.ok || !Array.isArray(response.uploads)) return;
+        setUploadStatuses(response.uploads);
+      })
+      .catch(() => {});
   }, []);
 
   const onTldrawMount = useCallback(
@@ -1243,6 +1495,126 @@ export function ResearchCanvasApp() {
       setMountedEditorCanvasId(effectiveCanvasId);
       editor.user.updateUserPreferences({ colorScheme: uiTheme });
       migrateLegacyYoutubeEmbedUrls(editor);
+      editor.registerExternalContentHandler("url", (info) => {
+        const normalized = normalizeLocalMediaUrl(info.url) ?? info.url;
+        if (createUrlBackedMediaShape(editor, normalized, info.point)) {
+          return;
+        }
+        const youtubeEmbedUrl = toYouTubeEmbedUrl(normalized);
+        const p = getDropPoint(editor, info.point);
+        if (youtubeEmbedUrl) {
+          editor.createShape({
+            id: toShapeId(
+              `external_embed_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            ),
+            type: "embed",
+            x: p.x,
+            y: p.y,
+            props: { url: youtubeEmbedUrl, w: 560, h: 315 },
+            meta: { sourceUrl: normalized },
+          });
+          return;
+        }
+        const assetId = toAssetId(
+          `external_bookmark_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        );
+        editor.createAssets([
+          {
+            id: assetId,
+            type: "bookmark",
+            typeName: "asset",
+            props: {
+              src: normalized,
+              title: safeDomain(normalized),
+              description: "",
+              image: "",
+              favicon: "",
+            },
+            meta: {},
+          },
+        ]);
+        editor.createShape({
+          id: toShapeId(
+            `external_bookmark_shape_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          ),
+          type: "bookmark",
+          x: p.x,
+          y: p.y,
+          props: { assetId, url: normalized },
+          meta: { sourceUrl: normalized },
+        });
+      });
+      editor.registerExternalContentHandler("files", (info: any) => {
+        void (async () => {
+          const files: File[] = Array.isArray(info?.files) ? info.files : [];
+          if (!files.length) return;
+          const point = info?.point;
+          const p = getDropPoint(editor, point);
+          let offset = 0;
+          for (const file of files) {
+            const mime = String(file.type || "").toLowerCase();
+            const isImage = mime.startsWith("image/");
+            const isVideo = mime.startsWith("video/");
+            if (!isImage && !isVideo) continue;
+            try {
+              const uploaded = await uploadMediaToLocalServer({
+                kind: isImage ? "image" : "video",
+                blob: file,
+                fileName: file.name || undefined,
+              });
+              const renderUrl = toRenderableMediaUrl(uploaded.url) ?? uploaded.url;
+              if (!renderUrl) continue;
+              const assetId = toAssetId(
+                `external_uploaded_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              );
+              const w = uploaded.width ?? (isImage ? 420 : 480);
+              const h = uploaded.height ?? (isImage ? 260 : 270);
+              editor.createAssets([
+                {
+                  id: assetId,
+                  type: isImage ? "image" : "video",
+                  typeName: "asset",
+                  props: {
+                    src: renderUrl,
+                    w,
+                    h,
+                    name: file.name || (isImage ? "Image" : "Video"),
+                    isAnimated: !isImage,
+                    mimeType: uploaded.mimeType || (isImage ? "image/*" : "video/*"),
+                  },
+                  meta: {},
+                } as any,
+              ]);
+              editor.createShape({
+                id: toShapeId(
+                  `external_uploaded_shape_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                ),
+                type: isImage ? "image" : "video",
+                x: p.x + offset,
+                y: p.y + offset,
+                props: isImage
+                  ? { assetId, w, h }
+                  : {
+                      w,
+                      h,
+                      assetId,
+                      time: 0,
+                      playing: false,
+                      autoplay: false,
+                      url: "",
+                      altText: file.name || "Video",
+                    },
+                meta: {
+                  sourceUrl: renderUrl,
+                },
+              } as any);
+              offset += 24;
+            } catch (error) {
+              console.error("Failed to upload dropped media file:", error);
+            }
+          }
+        })();
+      });
       const gridSeededKey = `research-canvas-grid-seeded-v1-${effectiveCanvasId}`;
       try {
         if (!localStorage.getItem(gridSeededKey)) {
@@ -1266,8 +1638,10 @@ export function ResearchCanvasApp() {
     const editor = editorRef.current;
     if (!editor || !currentCanvas) return;
     try {
-      const json = await serializeTldrawJson(editor);
-      const blob = new Blob([json], { type: "application/vnd.tldraw+json" });
+      const json = await serializeTldrawJsonUrlOnly(editor);
+      const blob = new Blob([json], {
+        type: "application/vnd.tldraw+json",
+      });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       const date = new Date().toISOString().slice(0, 10);
@@ -1368,6 +1742,7 @@ export function ResearchCanvasApp() {
             if (!snapshotSource) {
               throw new Error("Could not parse import file.");
             }
+            snapshotSource = hydrateImportedLocalMediaUrls(snapshotSource);
             if (isWrapped) {
               snapshotSource = {
                 ...(snapshotSource as any),
@@ -1540,6 +1915,12 @@ export function ResearchCanvasApp() {
     return () => window.clearTimeout(timeout);
   }, [importStatus]);
 
+  useEffect(() => {
+    if (!uploadToast) return;
+    const timeout = window.setTimeout(() => setUploadToast(""), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [uploadToast]);
+
   const muted = "#555555";
 
   return (
@@ -1598,7 +1979,9 @@ export function ResearchCanvasApp() {
                 fontSize: 12,
                 cursor: "pointer",
                 display:
-                  currentCanvas?.isPrivate && !isBlurredPrivate ? "flex" : "none",
+                  currentCanvas?.isPrivate && !isBlurredPrivate
+                    ? "flex"
+                    : "none",
                 alignItems: "center",
                 justifyContent: "center",
               }}
@@ -1685,10 +2068,29 @@ export function ResearchCanvasApp() {
                 {importStatus}
               </div>
             ) : null}
+            {uploadToast ? (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 14,
+                  right: 40,
+                  zIndex: 9999,
+                  fontSize: 12,
+                  background: "rgba(17,24,39,0.92)",
+                  color: "white",
+                  padding: "7px 10px",
+                  borderRadius: 8,
+                  fontFamily: "system-ui, sans-serif",
+                }}
+              >
+                {uploadToast}
+              </div>
+            ) : null}
             <Tldraw
               persistenceKey={`canvas-v2-${effectiveCanvasId}`}
               embeds={RESEARCH_EMBED_DEFINITIONS}
               shapeUtils={RESEARCH_SHAPE_UTILS}
+              assets={URL_BACKED_ASSET_STORE}
               onMount={onTldrawMount}
               components={TLDRAW_COMPONENTS}
             >
@@ -1707,13 +2109,13 @@ export function ResearchCanvasApp() {
                   onContextMenu={(e) => {
                     e.preventDefault();
                     const now = Date.now();
-                    const last = (window as any).__researchCanvasLastRightClickAt as
-                      | number
-                      | undefined;
+                    const last = (window as any)
+                      .__researchCanvasLastRightClickAt as number | undefined;
                     (window as any).__researchCanvasLastRightClickAt = now;
                     if (last && now - last < 650 && currentCanvas) {
                       setIsBlurredPrivate(false);
-                      (window as any).__researchCanvasLastRightClickAt = undefined;
+                      (window as any).__researchCanvasLastRightClickAt =
+                        undefined;
                     }
                   }}
                   style={{
@@ -1755,24 +2157,129 @@ export function ResearchCanvasApp() {
             }}
           >
             <span style={{ fontWeight: 600 }}>Boards</span>
-            <button
-              type="button"
-              onClick={handleCreateCanvas}
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button
+                type="button"
+                onClick={() => setShowUploadDialog(true)}
+                style={{
+                  border: isDarkTheme
+                    ? "1px solid rgba(148,163,184,0.5)"
+                    : "1px solid rgba(0,0,0,0.15)",
+                  background: "transparent",
+                  color: "inherit",
+                  borderRadius: 6,
+                  padding: "2px 6px",
+                  cursor: "pointer",
+                  fontSize: 11,
+                }}
+                title="Show upload process"
+              >
+                Uploads {activeUploads > 0 ? `(${activeUploads})` : ""}
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateCanvas}
+                style={{
+                  border: isDarkTheme
+                    ? "1px solid rgba(148,163,184,0.5)"
+                    : "1px solid rgba(0,0,0,0.15)",
+                  background: "transparent",
+                  color: "inherit",
+                  borderRadius: 6,
+                  padding: "2px 6px",
+                  cursor: "pointer",
+                  fontSize: 20,
+                }}
+              >
+                +
+              </button>
+            </div>
+          </div>
+          {showUploadDialog ? (
+            <div
               style={{
                 border: isDarkTheme
-                  ? "1px solid rgba(148,163,184,0.5)"
-                  : "1px solid rgba(0,0,0,0.15)",
-                background: "transparent",
-                color: "inherit",
-                borderRadius: 6,
-                padding: "2px 6px",
-                cursor: "pointer",
-                fontSize: 20,
+                  ? "1px solid rgba(148,163,184,0.4)"
+                  : "1px solid rgba(0,0,0,0.12)",
+                borderRadius: 8,
+                padding: 8,
+                background: isDarkTheme ? "rgba(15,23,42,0.35)" : "#ffffff",
+                maxHeight: 190,
+                overflowY: "auto",
               }}
             >
-              +
-            </button>
-          </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 6,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>Upload process</span>
+                <button
+                  type="button"
+                  onClick={() => setShowUploadDialog(false)}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "inherit",
+                    cursor: "pointer",
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              {uploadStatuses.length === 0 ? (
+                <div style={{ opacity: 0.75 }}>No uploads yet.</div>
+              ) : (
+                uploadStatuses.map((row) => (
+                  <div
+                    key={row.uploadId}
+                    style={{
+                      borderTop: "1px solid rgba(148,163,184,0.25)",
+                      paddingTop: 6,
+                      marginTop: 6,
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>{row.artifactTitle}</div>
+                    <div style={{ opacity: 0.8 }}>
+                      {row.kind} - {row.status}
+                    </div>
+                    {row.error ? (
+                      <div style={{ color: "#ef4444", marginTop: 2 }}>
+                        {row.error}
+                      </div>
+                    ) : null}
+                    {row.status === "error" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void chrome.runtime.sendMessage({
+                            type: "RETRY_UPLOAD",
+                            uploadId: row.uploadId,
+                          } as RuntimeMessage);
+                        }}
+                        style={{
+                          marginTop: 4,
+                          border: isDarkTheme
+                            ? "1px solid rgba(248,113,113,0.6)"
+                            : "1px solid rgba(220,38,38,0.45)",
+                          borderRadius: 6,
+                          background: "transparent",
+                          color: "inherit",
+                          cursor: "pointer",
+                          padding: "2px 6px",
+                        }}
+                      >
+                        Retry
+                      </button>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
           <div
             style={{
               flex: 1,

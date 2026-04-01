@@ -1,6 +1,6 @@
 # Research Canvas
 
-A Chromium extension that adds a **side-panel research canvas** powered by [tldraw](https://tldraw.com), with captures from the current tab (images, video clips, URL cards, selected text, regions). Data stays **local** in the browser (IndexedDB and extension storage).
+A Chromium extension that adds a **side-panel research canvas** powered by [tldraw](https://tldraw.com), with captures from the current tab (images, video clips, URL cards, selected text, regions). Captured image/video bytes can be saved to a local file server and referenced by URL in the board.
 
 **Requirements:** Chromium-based browser with **Manifest V3** and **Side Panel** support (e.g. Chrome **114+**).
 
@@ -32,7 +32,20 @@ npm run dev
 
 Leave this running while you develop. After each rebuild, **reload the extension** in the browser (see below).
 
-### 4. Typecheck
+### 4. Start the local media server (required for image/video uploads)
+
+```bash
+npm run local-media-server
+```
+
+This starts an Express server at `http://127.0.0.1:43123`, writes uploads to:
+
+- `local-media/images`
+- `local-media/videos`
+
+Keep this process running while capturing images/videos from the toolbar/context menu so the board stores media URLs instead of base64 payloads.
+
+### 5. Typecheck
 
 ```bash
 npm run check
@@ -58,6 +71,7 @@ Run **`npm run build`** again (or use **`npm run dev`** and wait for a rebuild),
 - Click the **extension icon** to open or focus the **side panel** (Research Canvas).
 - Use the **floating toolbar** on web pages for captures, or the **context menu** / **keyboard shortcuts** defined in `manifest.json` under `commands` (set shortcuts under **chrome://extensions/shortcuts**).
 - Right-click the page → **Show Research Canvas floating toolbar** if you hid the floating bar.
+- Open the board sidebar and use the **Uploads** button to view the upload process dialog (queued/uploading/success/error and retry failures).
 
 ## Project layout (short)
 

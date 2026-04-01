@@ -30,6 +30,8 @@ export interface ArtifactRecord {
   title: string;
   createdAt: number;
   dataUrl?: string;
+  /** URL served by the local media server for image/video bytes. */
+  mediaUrl?: string;
   blobId?: string;
   text?: string;
   width?: number;
@@ -125,6 +127,18 @@ export type RuntimeMessage =
   | { type: "OPEN_CANVAS"; artifactId?: string }
   | { type: "OPEN_CANVAS_TAB" }
   | { type: "OPEN_BOARD_SIDEBAR"; tabId: number }
+  | {
+      type: "UPLOAD_STATUS";
+      uploadId: string;
+      kind: "image" | "video";
+      status: "queued" | "uploading" | "success" | "error";
+      artifactTitle: string;
+      mediaUrl?: string;
+      error?: string;
+      createdAt: number;
+    }
+  | { type: "LIST_UPLOADS" }
+  | { type: "RETRY_UPLOAD"; uploadId: string }
   | { type: "SET_FLOATING_TOOLBAR_VISIBILITY"; visible: boolean }
   | { type: "SET_FLOATING_TOOLBAR_FOR_TAB"; tabId: number; visible: boolean }
   | { type: "GET_FLOATING_TOOLBAR_FOR_TAB"; tabId: number }

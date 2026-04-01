@@ -215,6 +215,21 @@ export function parseOfficialTldrawFile(
   }
 }
 
+function sanitizeArtifactsForBackup(rows: ArtifactRecord[]): ArtifactRecord[] {
+  return rows.map((artifact) => {
+    if (artifact.type !== "image" && artifact.type !== "video") {
+      return artifact;
+    }
+    const mediaUrl = artifact.mediaUrl;
+    return {
+      ...artifact,
+      mediaUrl,
+      dataUrl: undefined,
+      blobId: undefined,
+    };
+  });
+}
+
 async function getArtifactsForBackup(
   canvasId: string,
 ): Promise<ArtifactRecord[]> {
@@ -225,7 +240,7 @@ async function getArtifactsForBackup(
   if (!msg?.ok || !msg.artifacts) {
     return [];
   }
-  return msg.artifacts;
+  return sanitizeArtifactsForBackup(msg.artifacts);
 }
 
 async function getDeletedArtifactIdsForBackup(

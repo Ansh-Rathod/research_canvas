@@ -9,8 +9,9 @@ import {
   type RuntimeMessage,
 } from "@shared/messages";
 import { CAPTURE_RECT_INSET_PX, insetRect } from "@shared/captureRect";
-import { addArtifact, deleteArtifact, readBlobAsDataUrl } from "@storage/repositories";
+import { addArtifact, deleteArtifact } from "@storage/repositories";
 import { MAIN_DOCUMENT_ID } from "@shared/document";
+import { uploadMediaToLocalServer } from "@shared/localMediaUpload";
 
 const SHOW_FLOATING_TOOLBAR_MENU_ID = "research-canvas/show-floating-toolbar";
 const ACTION_POPUP_PATH = "src/popup/index.html";
@@ -24,6 +25,21 @@ async function setActionPopupEnabled(enabled: boolean) {
  * needed to decide open vs close — `chrome.sidePanel.open()` must run in the user-gesture turn).
  */
 let lastSidePanelHeartbeatAtMs = 0;
+type UploadStatusSnapshot = Extract<RuntimeMessage, { type: "UPLOAD_STATUS" }>;
+type PendingUploadRetry = {
+  uploadId: string;
+  canvasId: string;
+  tabId: number;
+  artifact: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">;
+};
+
+const uploadStatuses = new Map<string, UploadStatusSnapshot>();
+const pendingUploadRetries = new Map<string, PendingUploadRetry>();
+
+function setUploadStatus(status: UploadStatusSnapshot) {
+  uploadStatuses.set(status.uploadId, status);
+  void chrome.runtime.sendMessage(status).catch(() => {});
+}
 let activeCanvasHint:
   | {
       canvasId: string;
@@ -325,6 +341,80 @@ async function finalizeCaptureOutcome(
   } as RuntimeMessage);
 }
 
+async function uploadArtifactMediaIfNeeded(
+  input: Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">,
+): Promise<Omit<ArtifactRecord, "id" | "canvasId" | "createdAt">> {
+  if (!input.dataUrl) return input;
+  const shouldUploadImage =
+    input.type === "image" && input.dataUrl.startsWith("data:image/");
+  const shouldUploadVideo =
+    input.type === "video" && input.dataUrl.startsWith("data:video/");
+  if (!shouldUploadImage && !shouldUploadVideo) return input;
+
+  const blob = await (await fetch(input.dataUrl)).blob();
+  const kind = input.type === "image" ? "image" : "video";
+  const uploaded = await uploadMediaToLocalServer({
+    kind,
+    blob,
+    width: input.width,
+    height: input.height,
+  });
+
+  return {
+    ...input,
+    dataUrl: undefined,
+    mediaUrl: uploaded.url,
+    ...(input.type === "video" && uploaded.absolutePath
+      ? { localVideoAbsolutePath: uploaded.absolutePath }
+      : {}),
+  };
+}
+
+async function processCaptureWithUpload(
+  args: PendingUploadRetry,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { uploadId, canvasId, artifact, tabId } = args;
+  const createdAt = Date.now();
+  const kind = artifact.type === "video" ? "video" : "image";
+  setUploadStatus({
+    type: "UPLOAD_STATUS",
+    uploadId,
+    kind,
+    status: "uploading",
+    artifactTitle: artifact.title,
+    createdAt,
+  });
+  try {
+    const uploadedArtifact = await uploadArtifactMediaIfNeeded(artifact);
+    const tab = await chrome.tabs.get(tabId);
+    await finalizeCaptureOutcome(tab, uploadedArtifact, canvasId);
+    setUploadStatus({
+      type: "UPLOAD_STATUS",
+      uploadId,
+      kind,
+      status: "success",
+      artifactTitle: artifact.title,
+      mediaUrl: uploadedArtifact.mediaUrl,
+      createdAt,
+    });
+    pendingUploadRetries.delete(uploadId);
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setUploadStatus({
+      type: "UPLOAD_STATUS",
+      uploadId,
+      kind,
+      status: "error",
+      artifactTitle: artifact.title,
+      error: message,
+      createdAt,
+    });
+    pendingUploadRetries.set(uploadId, args);
+    return { ok: false, error: message };
+  }
+}
+
 async function runCaptureFlow(
   tab: chrome.tabs.Tab,
   action: CaptureAction,
@@ -353,7 +443,36 @@ async function runCaptureFlow(
   );
   try {
     const artifact = await captureArtifactForRequest(request);
-    await finalizeCaptureOutcome(tab, artifact, request.canvasId ?? canvasId);
+    const shouldUpload =
+      (artifact.type === "image" || artifact.type === "video") &&
+      typeof artifact.dataUrl === "string" &&
+      artifact.dataUrl.startsWith("data:");
+    if (!shouldUpload) {
+      await finalizeCaptureOutcome(tab, artifact, request.canvasId ?? canvasId);
+      return;
+    }
+    const uploadId = `upload_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setUploadStatus({
+      type: "UPLOAD_STATUS",
+      uploadId,
+      kind: artifact.type === "video" ? "video" : "image",
+      status: "queued",
+      artifactTitle: artifact.title,
+      createdAt: Date.now(),
+    });
+    const outcome = await processCaptureWithUpload({
+      uploadId,
+      canvasId: request.canvasId ?? canvasId,
+      tabId: tab.id,
+      artifact,
+    });
+    if (!outcome.ok) {
+      await notifyTabMessage(
+        tab.id,
+        `Research Canvas: upload failed (${outcome.error})`,
+        "center",
+      );
+    }
   } catch (error) {
     console.error("Capture action failed:", error);
     const msg = error instanceof Error ? error.message : String(error);
@@ -591,7 +710,25 @@ chrome.runtime.onMessage.addListener(
         };
         try {
           const canvasId = await resolveTargetCanvasId();
-          await finalizeCaptureOutcome(tab, artifact, canvasId);
+          const uploadId = `upload_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          setUploadStatus({
+            type: "UPLOAD_STATUS",
+            uploadId,
+            kind: "video",
+            status: "queued",
+            artifactTitle: artifact.title,
+            createdAt: Date.now(),
+          });
+          const outcome = await processCaptureWithUpload({
+            uploadId,
+            canvasId,
+            tabId: tab.id,
+            artifact,
+          });
+          if (!outcome.ok) {
+            sendResponse({ ok: false, error: outcome.error });
+            return;
+          }
           sendResponse({ ok: true });
         } catch (error) {
           sendResponse({
@@ -659,17 +796,28 @@ chrome.runtime.onMessage.addListener(
         const filtered = artifacts.filter((row) =>
           message.canvasId ? row.canvasId === message.canvasId : true,
         );
-        const withData = await Promise.all(
-          filtered.map(async (row) => {
-            if (row.dataUrl) return row;
-            if (row.blobId) {
-              const dataUrl = await mod.readBlobAsDataUrl(row.blobId);
-              return { ...row, dataUrl: dataUrl ?? undefined };
-            }
-            return row;
-          }),
-        );
-        sendResponse({ ok: true, artifacts: withData });
+        sendResponse({ ok: true, artifacts: filtered });
+        return;
+      }
+
+      if (message.type === "LIST_UPLOADS") {
+        sendResponse({
+          ok: true,
+          uploads: Array.from(uploadStatuses.values()).sort(
+            (a, b) => b.createdAt - a.createdAt,
+          ),
+        });
+        return;
+      }
+
+      if (message.type === "RETRY_UPLOAD") {
+        const pending = pendingUploadRetries.get(message.uploadId);
+        if (!pending) {
+          sendResponse({ ok: false, error: "No pending upload found." });
+          return;
+        }
+        const outcome = await processCaptureWithUpload(pending);
+        sendResponse(outcome);
         return;
       }
 
