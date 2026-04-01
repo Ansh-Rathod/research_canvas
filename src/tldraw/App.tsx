@@ -1,5 +1,6 @@
 import { type ArtifactRecord, type RuntimeMessage } from "@shared/messages";
 import type { CanvasMeta } from "@storage/canvases";
+import { MAIN_DOCUMENT_ID } from "@shared/document";
 import {
   getLastOpenCanvasId,
   loadCanvases,
@@ -605,7 +606,6 @@ function CanvasScene({
               id: existing.id as any,
               type: "embed",
               props: {
-                ...(existing.props as any),
                 url: youtubeEmbedUrl,
                 w: Math.max(420, Number((existing.props as any)?.w ?? 560)),
                 h: Math.max(260, Number((existing.props as any)?.h ?? 315)),
@@ -733,19 +733,33 @@ function toYouTubeEmbedUrl(rawUrl: string): string | null {
     const url = new URL(rawUrl);
     const host = url.hostname.replace(/^www\./, "").toLowerCase();
     let videoId = "";
-    if (host === "youtube.com" || host === "m.youtube.com") {
+    if (
+      host === "youtube.com" ||
+      host === "m.youtube.com" ||
+      host === "music.youtube.com"
+    ) {
       if (url.pathname === "/watch") {
         videoId = url.searchParams.get("v") ?? "";
       } else if (url.pathname.startsWith("/shorts/")) {
         videoId = url.pathname.split("/")[2] ?? "";
+      } else if (url.pathname.startsWith("/live/")) {
+        videoId = url.pathname.split("/")[2] ?? "";
       } else if (url.pathname.startsWith("/embed/")) {
+        videoId = url.pathname.split("/")[2] ?? "";
+      }
+    } else if (host === "youtube-nocookie.com") {
+      if (url.pathname.startsWith("/embed/")) {
         videoId = url.pathname.split("/")[2] ?? "";
       }
     } else if (host === "youtu.be") {
       videoId = url.pathname.replace("/", "");
     }
     if (!videoId) return null;
-    return `https://www.youtube-nocookie.com/embed/${videoId}`;
+    const embed = new URL(`https://www.youtube.com/embed/${videoId}`);
+    // Required identity hints for stricter YouTube embed validation paths.
+    embed.searchParams.set("origin", "https://www.youtube.com");
+    embed.searchParams.set("widget_referrer", "https://www.youtube.com");
+    return embed.toString();
   } catch {
     return null;
   }
@@ -1017,6 +1031,7 @@ export function ResearchCanvasApp() {
     string | null
   >(null);
   const loadArtifactsSeq = useRef(0);
+  const activeCanvasIdRef = useRef<string>(MAIN_DOCUMENT_ID);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
   const editorRef = useRef<Editor | null>(null);
   const unlockedPrivateCanvasesRef = useRef<Set<string>>(new Set());
@@ -1037,6 +1052,10 @@ export function ResearchCanvasApp() {
   const isDarkTheme = uiTheme === "dark";
 
   useEffect(() => {
+    activeCanvasIdRef.current = effectiveCanvasId;
+  }, [effectiveCanvasId]);
+
+  useEffect(() => {
     try {
       const saved = localStorage.getItem("research-canvas-ui-theme");
       if (saved === "dark" || saved === "light") {
@@ -1051,7 +1070,8 @@ export function ResearchCanvasApp() {
     } catch {}
   }, [uiTheme]);
 
-  const loadArtifacts = useCallback(async () => {
+  const loadArtifacts = useCallback(async (targetCanvasId?: string) => {
+    const canvasIdToLoad = targetCanvasId ?? activeCanvasIdRef.current;
     const seq = (loadArtifactsSeq.current += 1);
     const base = await listArtifacts();
     const withData: ArtifactRecord[] = await Promise.all(
@@ -1065,10 +1085,11 @@ export function ResearchCanvasApp() {
       }),
     );
     if (seq !== loadArtifactsSeq.current) return;
-    setArtifacts(withData.filter((row) => row.canvasId === effectiveCanvasId));
-  }, [effectiveCanvasId]);
+    if (canvasIdToLoad !== activeCanvasIdRef.current) return;
+    setArtifacts(withData.filter((row) => row.canvasId === canvasIdToLoad));
+  }, []);
 
-  loadArtifactsRef.current = loadArtifacts;
+  loadArtifactsRef.current = () => loadArtifacts(activeCanvasIdRef.current);
 
   useEffect(() => {
     void chrome.storage.local.remove("pendingCaptureRequest");
@@ -1086,7 +1107,7 @@ export function ResearchCanvasApp() {
       const unlocked = unlockedPrivateCanvasesRef.current.has(initial.id);
       setIsBlurredPrivate(isPrivate && !unlocked);
       if (cancelled) return;
-      await loadArtifacts();
+      await loadArtifacts(initial.id);
       if (!cancelled) setSessionReady(true);
     })();
     return () => {
@@ -1112,7 +1133,7 @@ export function ResearchCanvasApp() {
         await applyCanvasBackup(editor, pending.snapshot as any, {
           mode: pending.applyMode,
         });
-        await loadArtifacts();
+        await loadArtifacts(pending.canvasId);
         console.debug("[ResearchCanvas] import: apply completed", {
           sourceKind: pending.sourceKind,
         });
@@ -1418,7 +1439,7 @@ export function ResearchCanvasApp() {
     await setLastOpenCanvasId(id);
     setCurrentCanvasId(id);
     setIsBlurredPrivate(false);
-    await loadArtifacts();
+    await loadArtifacts(id);
   }, [canvases, loadArtifacts]);
 
   const handleSelectCanvas = useCallback(
@@ -1431,7 +1452,7 @@ export function ResearchCanvasApp() {
       const isPrivate = !!nextCurrent.isPrivate;
       const unlocked = unlockedPrivateCanvasesRef.current.has(id);
       setIsBlurredPrivate(isPrivate && !unlocked);
-      await loadArtifacts();
+      await loadArtifacts(id);
     },
     [canvases, currentCanvasId, loadArtifacts],
   );
@@ -1494,7 +1515,7 @@ export function ResearchCanvasApp() {
         await setLastOpenCanvasId(freshId);
         setCurrentCanvasId(freshId);
         setIsBlurredPrivate(false);
-        await loadArtifacts();
+        await loadArtifacts(freshId);
         return;
       }
       setCanvases(remaining);
@@ -1506,7 +1527,7 @@ export function ResearchCanvasApp() {
         const isPrivate = !!next.isPrivate;
         const unlocked = unlockedPrivateCanvasesRef.current.has(next.id);
         setIsBlurredPrivate(isPrivate && !unlocked);
-        await loadArtifacts();
+        await loadArtifacts(next.id);
       }
     },
     [canvases, currentCanvasId, loadArtifacts],

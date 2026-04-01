@@ -18,18 +18,22 @@ export class ResearchEmbedShapeUtil extends EmbedShapeUtil {
     const node = super.component(shape);
     if (!isValidElement(node)) return node;
 
-    const kids = (node.props as { children?: unknown }).children;
-    const patchIframe = (child: unknown) => {
+    const patchTree = (child: unknown): unknown => {
       if (!isValidElement(child)) return child;
-      if (child.type === "iframe") {
-        return cloneElement(child as ReactElement<Record<string, unknown>>, {
-          referrerPolicy: "strict-origin-when-cross-origin",
-        });
+      const element = child as ReactElement<Record<string, unknown>>;
+      const children = (element.props as { children?: unknown }).children;
+      const nextChildren = Children.map(children, patchTree);
+      const nextProps: Record<string, unknown> = {};
+      if (nextChildren !== children) nextProps.children = nextChildren;
+      if (element.type === "iframe") {
+        nextProps.referrerPolicy = "strict-origin-when-cross-origin";
       }
-      return child;
+      if (Object.keys(nextProps).length === 0) return element;
+      return cloneElement(element, nextProps);
     };
 
-    const nextChildren = Children.map(kids, patchIframe);
+    const kids = (node.props as { children?: unknown }).children;
+    const nextChildren = Children.map(kids, patchTree);
     return cloneElement(node, { children: nextChildren } as never);
   }
 }
