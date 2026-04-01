@@ -24,6 +24,38 @@ async function setActionPopupEnabled(enabled: boolean) {
  * needed to decide open vs close — `chrome.sidePanel.open()` must run in the user-gesture turn).
  */
 let lastSidePanelHeartbeatAtMs = 0;
+let activeCanvasHint:
+  | {
+      canvasId: string;
+      updatedAtMs: number;
+    }
+  | null = null;
+
+const ACTIVE_CANVAS_HINT_TTL_MS = 15000;
+
+function updateActiveCanvasHint(canvasId: string | undefined) {
+  if (!canvasId || typeof canvasId !== "string") return;
+  activeCanvasHint = {
+    canvasId,
+    updatedAtMs: Date.now(),
+  };
+}
+
+async function resolveTargetCanvasId(): Promise<string> {
+  const now = Date.now();
+  if (
+    activeCanvasHint?.canvasId &&
+    now - activeCanvasHint.updatedAtMs <= ACTIVE_CANVAS_HINT_TTL_MS
+  ) {
+    return activeCanvasHint.canvasId;
+  }
+  const stored = await chrome.storage.local.get("researchCanvasLastOpenCanvasId");
+  return (
+    (typeof stored.researchCanvasLastOpenCanvasId === "string" &&
+      stored.researchCanvasLastOpenCanvasId) ||
+    MAIN_DOCUMENT_ID
+  );
+}
 
 function createRequest(
   tabId: number,
@@ -310,13 +342,7 @@ async function runCaptureFlow(
     return;
   }
 
-  const stored = await chrome.storage.local.get(
-    "researchCanvasLastOpenCanvasId",
-  );
-  const canvasId =
-    (typeof stored.researchCanvasLastOpenCanvasId === "string" &&
-      stored.researchCanvasLastOpenCanvasId) ||
-    MAIN_DOCUMENT_ID;
+  const canvasId = await resolveTargetCanvasId();
   const request = createRequest(
     tab.id,
     action,
@@ -406,6 +432,7 @@ chrome.runtime.onMessage.addListener(
 
       if (message.type === "SIDE_PANEL_HEARTBEAT") {
         lastSidePanelHeartbeatAtMs = Date.now();
+        updateActiveCanvasHint(message.canvasId);
         await setActionPopupEnabled(false);
         sendResponse({ ok: true });
         return;
@@ -496,6 +523,7 @@ chrome.runtime.onMessage.addListener(
       }
 
       if (message.type === "FULLSCREEN_CANVAS_ACTIVE") {
+        updateActiveCanvasHint(message.canvasId);
         const panelSeemsLive =
           lastSidePanelHeartbeatAtMs > 0 &&
           Date.now() - lastSidePanelHeartbeatAtMs < 12000;
@@ -562,13 +590,7 @@ chrome.runtime.onMessage.addListener(
           height,
         };
         try {
-          const stored = await chrome.storage.local.get(
-            "researchCanvasLastOpenCanvasId",
-          );
-          const canvasId =
-            (typeof stored.researchCanvasLastOpenCanvasId === "string" &&
-              stored.researchCanvasLastOpenCanvasId) ||
-            MAIN_DOCUMENT_ID;
+          const canvasId = await resolveTargetCanvasId();
           await finalizeCaptureOutcome(tab, artifact, canvasId);
           sendResponse({ ok: true });
         } catch (error) {

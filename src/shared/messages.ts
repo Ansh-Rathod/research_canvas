@@ -76,7 +76,7 @@ export type RuntimeMessage =
    * Side panel → service worker: panel JS is alive (sync timestamp, no `await` before
    * `sidePanel.open()` in toggle — storage alone would require `await` and break the gesture).
    */
-  | { type: "SIDE_PANEL_HEARTBEAT" }
+  | { type: "SIDE_PANEL_HEARTBEAT"; canvasId?: string }
   /** Side panel became hidden — clear SW “live” state so the toolbar toggle can open again. */
   | { type: "SIDE_PANEL_HIDDEN" }
   /** Service worker → side panel document to dismiss the panel. */
@@ -132,7 +132,7 @@ export type RuntimeMessage =
    * Full-screen canvas tab became active (tab switch or focus) — background should close any live
    * side panel instance so the floating toolbar toggle semantics stay consistent.
    */
-  | { type: "FULLSCREEN_CANVAS_ACTIVE" };
+  | { type: "FULLSCREEN_CANVAS_ACTIVE"; canvasId?: string };
 
 export const CONTEXT_MENU_IDS: Record<CaptureAction, string> = {
   "capture-selected-text-heading":

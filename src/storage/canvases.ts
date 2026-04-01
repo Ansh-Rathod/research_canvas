@@ -20,7 +20,7 @@ function createDefaultCanvas(): CanvasMeta {
   const timestamp = now();
   return {
     id: MAIN_DOCUMENT_ID,
-    name: "Canvas 1",
+    name: "Board 1",
     createdAt: timestamp,
     updatedAt: timestamp,
     isHidden: false,
@@ -57,7 +57,7 @@ export function makeCanvasId(): string {
   return `canvas_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function nextCanvasName(existing: CanvasMeta[], baseName = "Canvas") {
+export function nextCanvasName(existing: CanvasMeta[], baseName = "Board") {
   const taken = new Set(existing.map((c) => c.name));
   if (!taken.has(`${baseName} 1`)) return `${baseName} 1`;
   let i = 2;

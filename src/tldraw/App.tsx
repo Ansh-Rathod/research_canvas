@@ -1034,7 +1034,6 @@ export function ResearchCanvasApp() {
   const activeCanvasIdRef = useRef<string>(MAIN_DOCUMENT_ID);
   const loadArtifactsRef = useRef<() => Promise<void>>(async () => {});
   const editorRef = useRef<Editor | null>(null);
-  const unlockedPrivateCanvasesRef = useRef<Set<string>>(new Set());
   const pendingImportRef = useRef<PendingImport | null>(null);
 
   const isFullScreenTab = (() => {
@@ -1104,8 +1103,7 @@ export function ResearchCanvasApp() {
       setCanvases(storedCanvases);
       setCurrentCanvasId(initial.id);
       const isPrivate = !!initial.isPrivate;
-      const unlocked = unlockedPrivateCanvasesRef.current.has(initial.id);
-      setIsBlurredPrivate(isPrivate && !unlocked);
+      setIsBlurredPrivate(isPrivate);
       if (cancelled) return;
       await loadArtifacts(initial.id);
       if (!cancelled) setSessionReady(true);
@@ -1166,6 +1164,7 @@ export function ResearchCanvasApp() {
       void chrome.storage.local.set({ sidePanelHeartbeatAt: now });
       void chrome.runtime.sendMessage({
         type: "SIDE_PANEL_HEARTBEAT",
+        canvasId: effectiveCanvasId,
       } as RuntimeMessage);
     };
     heartbeat();
@@ -1190,7 +1189,7 @@ export function ResearchCanvasApp() {
         type: "SIDE_PANEL_HIDDEN",
       } as RuntimeMessage);
     };
-  }, []);
+  }, [effectiveCanvasId, isSidePanelMode]);
 
   useEffect(() => {
     if (!isFullScreenTab) {
@@ -1200,6 +1199,7 @@ export function ResearchCanvasApp() {
     const notifyActive = () => {
       void chrome.runtime.sendMessage({
         type: "FULLSCREEN_CANVAS_ACTIVE",
+        canvasId: effectiveCanvasId,
       } as RuntimeMessage);
     };
 
@@ -1219,7 +1219,7 @@ export function ResearchCanvasApp() {
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onFocus);
     };
-  }, [isFullScreenTab]);
+  }, [effectiveCanvasId, isFullScreenTab]);
 
   useEffect(() => {
     const listener = (msg: RuntimeMessage) => {
@@ -1450,8 +1450,7 @@ export function ResearchCanvasApp() {
       setCurrentCanvasId(id);
       await setLastOpenCanvasId(id);
       const isPrivate = !!nextCurrent.isPrivate;
-      const unlocked = unlockedPrivateCanvasesRef.current.has(id);
-      setIsBlurredPrivate(isPrivate && !unlocked);
+      setIsBlurredPrivate(isPrivate);
       await loadArtifacts(id);
     },
     [canvases, currentCanvasId, loadArtifacts],
@@ -1486,8 +1485,7 @@ export function ResearchCanvasApp() {
       if (currentCanvasId === id) {
         const nowPrivate = updated.find((c) => c.id === id)?.isPrivate;
         if (nowPrivate) {
-          const unlocked = unlockedPrivateCanvasesRef.current.has(id);
-          setIsBlurredPrivate(!unlocked);
+          setIsBlurredPrivate(true);
         } else {
           setIsBlurredPrivate(false);
         }
@@ -1505,7 +1503,7 @@ export function ResearchCanvasApp() {
         const now = Date.now();
         const created: CanvasMeta = {
           id: freshId,
-          name: "Canvas 1",
+          name: "Board 1",
           isPrivate: false,
           createdAt: now,
           updatedAt: now,
@@ -1525,8 +1523,7 @@ export function ResearchCanvasApp() {
         setCurrentCanvasId(next.id);
         await setLastOpenCanvasId(next.id);
         const isPrivate = !!next.isPrivate;
-        const unlocked = unlockedPrivateCanvasesRef.current.has(next.id);
-        setIsBlurredPrivate(isPrivate && !unlocked);
+        setIsBlurredPrivate(isPrivate);
         await loadArtifacts(next.id);
       }
     },
@@ -1582,6 +1579,34 @@ export function ResearchCanvasApp() {
           </div>
         ) : (
           <>
+            <button
+              type="button"
+              onClick={() => setIsBlurredPrivate(true)}
+              style={{
+                position: "absolute",
+                bottom: 110,
+                right: 6,
+                zIndex: 10000,
+                width: 24,
+                height: 24,
+                borderRadius: 999,
+                border: "none",
+                background: isDarkTheme
+                  ? "rgba(226,232,240,0.95)"
+                  : "rgba(17,24,39,0.9)",
+                color: isDarkTheme ? "#111827" : "white",
+                fontSize: 12,
+                cursor: "pointer",
+                display:
+                  currentCanvas?.isPrivate && !isBlurredPrivate ? "flex" : "none",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              title="Lock board"
+              aria-label="Lock board"
+            >
+              🔒
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -1687,7 +1712,6 @@ export function ResearchCanvasApp() {
                       | undefined;
                     (window as any).__researchCanvasLastRightClickAt = now;
                     if (last && now - last < 650 && currentCanvas) {
-                      unlockedPrivateCanvasesRef.current.add(currentCanvas.id);
                       setIsBlurredPrivate(false);
                       (window as any).__researchCanvasLastRightClickAt = undefined;
                     }

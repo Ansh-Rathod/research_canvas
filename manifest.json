@@ -53,6 +53,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://youtube.com https://m.youtube.com https://www.google.com https://accounts.google.com;"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; frame-src https://www.youtube.com https://youtube.com https://m.youtube.com https://music.youtube.com https://*.youtube.com https://www.youtube-nocookie.com https://*.youtube-nocookie.com https://www.google.com https://*.google.com https://accounts.google.com https://accounts.youtube.com; child-src https://www.youtube.com https://youtube.com https://m.youtube.com https://music.youtube.com https://*.youtube.com https://www.youtube-nocookie.com https://*.youtube-nocookie.com https://www.google.com https://*.google.com https://accounts.google.com https://accounts.youtube.com;"
   }
 }
